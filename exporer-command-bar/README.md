@@ -30,6 +30,9 @@ Designed for Windows 11 24H2 / 25H2 with the WinAppSDK (WinUI 3) File Explorer.
 - **Rock solid** — buttons are re‑applied automatically across tab switches,
   navigation, new tabs and new windows, and everything is cleanly restored when
   the mod is disabled.
+- **Plays well with others** — no XAML Diagnostics, so the mod can be used
+  together with **Windows 11 File Explorer Styler** and other tools which rely
+  on it (see [How it works](#how-it-works)).
 
 ## Screenshots
 
@@ -89,9 +92,25 @@ in the mod settings.
 
 ## How it works
 
-The mod injects a XAML diagnostics provider into Explorer and watches the WinUI
-3 visual tree for the File Explorer command bar. When it appears, the configured
-buttons are inserted and the visibility / spacing settings are applied. The mod
-listens for the command bar being rebuilt so the buttons stay in place across
-navigation, new tabs and new windows, and it restores the original state of any
-element it touches when disabled.
+The mod hooks a couple of functions of File Explorer's own WinUI 3 code
+(`FileExplorerExtensions.dll`) which run when the command bar is built, and finds
+the command bars from there by walking the XAML tree with `VisualTreeHelper`. The
+configured buttons are then inserted and the visibility / spacing settings are
+applied. The mod also listens for the command bar being rebuilt so the buttons
+stay in place across navigation, new tabs and new windows, and it restores the
+original state of any element it touches when disabled.
+
+### Compatibility
+
+Notably, the mod does **not** use XAML Diagnostics
+(`InitializeXamlDiagnosticsEx`). Only one XAML diagnostics consumer can be active
+in a process at a time, so a mod which uses it stops working as soon as another
+one is enabled. Avoiding it means this mod can be used together with:
+
+* **Windows 11 File Explorer Styler**
+* ExplorerBlurMica, TranslucentTB and similar tools
+* UWPSpy and other XAML inspection tools
+
+File Explorer windows which are already open when the mod is enabled are handled
+too, but if the buttons don't show up in one of them right away, opening a new
+tab or navigating to another folder makes them appear.
