@@ -2,7 +2,7 @@
 // @id              explorer-command-bar
 // @name            Explorer Command Bar
 // @description     Add your own buttons and dropdown menus to the Windows 11 File Explorer command bar, and hide the built-in ones
-// @version         1.0.0
+// @version         1.0.1
 // @author          DanRotaru
 // @github          https://github.com/DanRotaru
 // @homepage        https://dan13.me/
@@ -248,6 +248,13 @@ a new tab or navigating to another folder makes them appear.
         - parameters: '"%path%"'
         - iconGlyph: ""
         - separatorAfter: false
+        - subItems:
+          - - name: ""
+            - command: ""
+            - parameters: ""
+            - iconGlyph: ""
+            - hideIcon: false
+            - separatorAfter: false
       - - type: button
         - name: Open Paint
         - command: mspaint.exe
@@ -410,8 +417,11 @@ a new tab or navigating to another folder makes them appear.
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 #include <cwctype>
+#include <functional>
 #include <memory>
+#include <type_traits>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -548,6 +558,54 @@ thread_local std::vector<CommandBarEntry> g_entries;
 // Set once a scan of this thread's XAML island found its command bars, so the
 // focus hook can skip the tree walk while they're still around.
 thread_local bool g_threadScanned;
+
+// Every event handler the mod registers on the elements it creates has to be
+// revoked before the mod is unloaded. The delegate object itself lives in this
+// DLL, so XAML releasing it afterwards - even without ever invoking it again -
+// would run code from an unmapped module. Handlers are registered with
+// winrt::auto_revoke and their revokers are kept here until the buttons are
+// taken down, or until the mod is disabled.
+struct TrackedRevoker {
+    winrt::weak_ref<wf::IInspectable> source;
+    std::function<void()> revoke;
+};
+
+thread_local std::vector<TrackedRevoker> g_revokers;
+
+template <typename T, typename Revoker>
+void TrackRevoker(T const& source, Revoker&& revoker) {
+    // Entries whose element is gone can go: XAML released their delegates
+    // together with the element itself.
+    for (auto it = g_revokers.begin(); it != g_revokers.end();) {
+        if (!it->source.get()) {
+            it = g_revokers.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    // The revoker types differ per event, so they're type-erased behind the
+    // std::function. Calling revoke() twice is harmless: the second call is a
+    // no-op, which is also what the revoker's own destructor does.
+    auto held =
+        std::make_shared<std::decay_t<Revoker>>(std::forward<Revoker>(revoker));
+
+    g_revokers.push_back({winrt::weak_ref<wf::IInspectable>{source},
+                          [held]() { held->revoke(); }});
+}
+
+void RevokeHandlersForCurrentThread() {
+    std::vector<TrackedRevoker> taken;
+    taken.swap(g_revokers);
+
+    for (auto const& tracked : taken) {
+        try {
+            tracked.revoke();
+        } catch (...) {
+            Wh_Log(L"Error %08X", winrt::to_hresult().value);
+        }
+    }
+}
 
 // The Explorer elements we touch, each with the original state captured the
 // first time we touched it, so it can be restored exactly instead of forcing a
@@ -900,7 +958,8 @@ void LaunchItemForWindow(HWND hExplorerWnd, ActionItem const& item) {
                item.command.c_str());
     }
 
-    SHELLEXECUTEINFOW execInfo = {sizeof(execInfo)};
+    SHELLEXECUTEINFOW execInfo{};
+    execInfo.cbSize = sizeof(execInfo);
     // No UI: a command which doesn't exist would otherwise put up a modal
     // error box on this thread, which the mod would then have to wait for
     // while unloading. The failure is logged below instead. NOASYNC because
@@ -2177,12 +2236,15 @@ muxc::AppBarButton CreateActionButton(ActionItem const& item, int index) {
     muxc::AppBarButton button =
         CreateBareButton(index, item.name, MakeCommandButtonIcon(item));
 
-    button.Click([item](wf::IInspectable const& sender,
-                        mux::RoutedEventArgs const&) {
-        if (auto element = sender.try_as<mux::FrameworkElement>()) {
-            OnActionInvoked(element, item);
-        }
-    });
+    TrackRevoker(button,
+                 button.Click(winrt::auto_revoke,
+                              [item](wf::IInspectable const& sender,
+                                     mux::RoutedEventArgs const&) {
+                                  if (auto element =
+                                          sender.try_as<mux::FrameworkElement>()) {
+                                      OnActionInvoked(element, item);
+                                  }
+                              }));
 
     return button;
 }
@@ -2216,12 +2278,14 @@ muxc::MenuFlyoutItemBase CreateMenuEntry(
         }
     }
 
-    menuItem.Click([item, weakButton](wf::IInspectable const&,
-                                      mux::RoutedEventArgs const&) {
-        if (auto button = weakButton.get()) {
-            OnActionInvoked(button, item);
-        }
-    });
+    TrackRevoker(menuItem,
+                 menuItem.Click(winrt::auto_revoke,
+                                [item, weakButton](wf::IInspectable const&,
+                                                   mux::RoutedEventArgs const&) {
+                                    if (auto button = weakButton.get()) {
+                                        OnActionInvoked(button, item);
+                                    }
+                                }));
 
     return menuItem;
 }
@@ -2238,36 +2302,51 @@ void AppendMenuEntries(std::vector<ActionItem> const& items,
     }
 }
 
-// The hover timers of our menu buttons. A started timer is rooted by the
-// dispatcher queue and its Tick handler lives in this DLL, so the timers have
-// to be stopped before the mod is unloaded.
-thread_local std::vector<winrt::weak_ref<mux::DispatcherTimer>> g_hoverTimers;
+// The hover timers of our menu buttons, with their Tick registration. A started
+// timer is rooted by the dispatcher queue, and its Tick handler lives in this
+// DLL, so a timer has to be stopped and its handler revoked before the mod is
+// unloaded. The timer is held strongly - unlike the elements, DispatcherTimer
+// isn't a DependencyObject, so it isn't necessarily weak-referenceable - and
+// released once the button it belongs to is gone.
+struct HoverTimerEntry {
+    winrt::weak_ref<muxc::AppBarButton> button;
+    mux::DispatcherTimer timer;
+    winrt::event_token tickToken;
+};
 
-void TrackHoverTimer(mux::DispatcherTimer const& timer) {
-    // Drop the timers which are gone with their button.
+thread_local std::vector<HoverTimerEntry> g_hoverTimers;
+
+void ReleaseHoverTimer(HoverTimerEntry const& entry) {
+    try {
+        entry.timer.Stop();
+        entry.timer.Tick(entry.tickToken);
+    } catch (...) {
+        Wh_Log(L"Error %08X", winrt::to_hresult().value);
+    }
+}
+
+void TrackHoverTimer(muxc::AppBarButton const& button,
+                     mux::DispatcherTimer const& timer,
+                     winrt::event_token tickToken) {
+    // Drop the timers whose button is gone.
     for (auto it = g_hoverTimers.begin(); it != g_hoverTimers.end();) {
-        if (!it->get()) {
+        if (!it->button.get()) {
+            ReleaseHoverTimer(*it);
             it = g_hoverTimers.erase(it);
         } else {
             ++it;
         }
     }
 
-    g_hoverTimers.push_back(winrt::make_weak(timer));
+    g_hoverTimers.push_back({winrt::make_weak(button), timer, tickToken});
 }
 
 void StopHoverTimersForCurrentThread() {
-    std::vector<winrt::weak_ref<mux::DispatcherTimer>> taken;
+    std::vector<HoverTimerEntry> taken;
     taken.swap(g_hoverTimers);
 
-    for (auto const& weakTimer : taken) {
-        if (auto timer = weakTimer.get()) {
-            try {
-                timer.Stop();
-            } catch (...) {
-                Wh_Log(L"Error %08X", winrt::to_hresult().value);
-            }
-        }
+    for (auto const& entry : taken) {
+        ReleaseHoverTimer(entry);
     }
 }
 
@@ -2302,21 +2381,29 @@ muxc::AppBarButton CreateMenuButton(ActionItem const& item,
         }
     };
 
-    menu.Opening([ensureMenuEntries](wf::IInspectable const& sender,
-                                     wf::IInspectable const&) {
-        ensureMenuEntries(sender.try_as<muxc::MenuFlyout>());
-    });
+    TrackRevoker(menu,
+                 menu.Opening(winrt::auto_revoke,
+                              [ensureMenuEntries](
+                                  wf::IInspectable const& sender,
+                                  wf::IInspectable const&) {
+                                  ensureMenuEntries(
+                                      sender.try_as<muxc::MenuFlyout>());
+                              }));
 
     // Also while the pointer is on its way to the button, which is both a
     // little earlier than the click and a safety net for the case above.
-    button.PointerEntered(
-        [ensureMenuEntries, weakButton](
-            wf::IInspectable const&,
-            mux::Input::PointerRoutedEventArgs const&) {
-            if (auto button = weakButton.get()) {
-                ensureMenuEntries(button.Flyout().try_as<muxc::MenuFlyout>());
-            }
-        });
+    TrackRevoker(
+        button,
+        button.PointerEntered(
+            winrt::auto_revoke,
+            [ensureMenuEntries, weakButton](
+                wf::IInspectable const&,
+                mux::Input::PointerRoutedEventArgs const&) {
+                if (auto button = weakButton.get()) {
+                    ensureMenuEntries(
+                        button.Flyout().try_as<muxc::MenuFlyout>());
+                }
+            }));
 
     button.Flyout(menu);
 
@@ -2333,41 +2420,51 @@ muxc::AppBarButton CreateMenuButton(ActionItem const& item,
         };
 
         if (hoverDelayMs <= 0) {
-            button.PointerEntered(
-                [showMenu](wf::IInspectable const&,
-                           mux::Input::PointerRoutedEventArgs const&) {
-                    showMenu();
-                });
+            TrackRevoker(
+                button,
+                button.PointerEntered(
+                    winrt::auto_revoke,
+                    [showMenu](wf::IInspectable const&,
+                               mux::Input::PointerRoutedEventArgs const&) {
+                        showMenu();
+                    }));
         } else {
             mux::DispatcherTimer timer;
             timer.Interval(std::chrono::milliseconds(hoverDelayMs));
-            TrackHoverTimer(timer);
 
-            // Capture the timer weakly in its own Tick handler to avoid a
-            // reference cycle.
-            timer.Tick([weakTimer = winrt::make_weak(timer), showMenu](
-                           wf::IInspectable const&,
+            // The handler gets the timer as its sender, so it doesn't have to
+            // capture it - which would be either a reference cycle or a weak
+            // reference on a type that isn't a DependencyObject.
+            auto tickToken = timer.Tick(
+                [showMenu](wf::IInspectable const& sender,
                            wf::IInspectable const&) {
-                if (auto timer = weakTimer.get()) {
-                    timer.Stop();
-                }
-                showMenu();
-            });
-
-            button.PointerEntered(
-                [timer](wf::IInspectable const&,
-                        mux::Input::PointerRoutedEventArgs const&) {
-                    timer.Stop();  // Restart the delay.
-                    timer.Start();
+                    if (auto timer = sender.try_as<mux::DispatcherTimer>()) {
+                        timer.Stop();
+                    }
+                    showMenu();
                 });
+
+            TrackHoverTimer(button, timer, tickToken);
+
+            TrackRevoker(
+                button,
+                button.PointerEntered(
+                    winrt::auto_revoke,
+                    [timer](wf::IInspectable const&,
+                            mux::Input::PointerRoutedEventArgs const&) {
+                        timer.Stop();  // Restart the delay.
+                        timer.Start();
+                    }));
 
             auto stopTimer =
                 [timer](wf::IInspectable const&,
                         mux::Input::PointerRoutedEventArgs const&) {
                     timer.Stop();
                 };
-            button.PointerExited(stopTimer);
-            button.PointerCanceled(stopTimer);
+            TrackRevoker(button, button.PointerExited(winrt::auto_revoke,
+                                                      stopTimer));
+            TrackRevoker(button, button.PointerCanceled(winrt::auto_revoke,
+                                                        stopTimer));
         }
     }
 
@@ -2437,9 +2534,24 @@ void UpdateCommandBar(muxc::CommandBar const& commandBar) {
 void RemoveOurButtons(muxc::CommandBar const& commandBar) {
     auto commands = commandBar.PrimaryCommands();
     for (uint32_t i = commands.Size(); i > 0; i--) {
-        if (IsOurElement(commands.GetAt(i - 1))) {
-            commands.RemoveAt(i - 1);
+        auto command = commands.GetAt(i - 1);
+        if (!IsOurElement(command)) {
+            continue;
         }
+
+        // An open menu flyout lives in a popup rooted by the XamlRoot, not by
+        // the button, so it would stay on screen after the button is gone.
+        if (auto button = command.try_as<muxc::AppBarButton>()) {
+            if (auto flyout = button.Flyout()) {
+                try {
+                    flyout.Hide();
+                } catch (...) {
+                    Wh_Log(L"Error %08X", winrt::to_hresult().value);
+                }
+            }
+        }
+
+        commands.RemoveAt(i - 1);
     }
 }
 
@@ -2495,9 +2607,12 @@ void OnCommandBarAdded(muxc::CommandBar const& commandBar) {
 }
 
 void RemoveButtonsForCurrentThread() {
-    // Before restoring anything, so the watcher can't fight the restore.
+    // Before restoring anything, so the watcher can't fight the restore, and
+    // before the buttons go away, while the elements the handlers are
+    // registered on are still around.
     UnwatchVisibilityForCurrentThread();
     StopHoverTimersForCurrentThread();
+    RevokeHandlersForCurrentThread();
 
     std::vector<CommandBarEntry> taken;
     taken.swap(g_entries);
@@ -2528,9 +2643,10 @@ void RemoveButtonsForCurrentThread() {
 }
 
 void RefreshButtonsForCurrentThread() {
-    // The buttons are recreated below, so the hover timers of the old ones are
-    // stopped and forgotten first.
+    // The buttons are recreated below, so the hover timers and event handlers
+    // of the old ones are released first.
     StopHoverTimersForCurrentThread();
+    RevokeHandlersForCurrentThread();
 
     // A copy, since UpdateCommandBar below can add entries.
     std::vector<winrt::weak_ref<muxc::CommandBar>> commandBars;
