@@ -1,7 +1,7 @@
 // ==WindhawkMod==
 // @id              explorer-command-bar
 // @name            Explorer Command Bar
-// @description     Add your own buttons and dropdown menus to the Windows 11 File Explorer command bar, replace New with New+, and hide the built-in ones
+// @description     Customize the Windows 11 File Explorer command bar with commands, menus, New+, and a shell context-menu button
 // @version         1.1.0
 // @author          DanRotaru
 // @github          https://github.com/DanRotaru
@@ -31,6 +31,9 @@ Explorer.
   command of your choice.
 - **Dropdown menus & submenus** - a button can open a menu, and menu entries
   can themselves be submenus (three levels deep).
+- **Shell context menu item** - optionally add an item which opens the real
+  context menu of the active selection or folder, including shell extensions
+  and optional Nilesoft Shell support.
 - **Path & selection placeholders** - `%path%` (active tab folder) and `%sel%`
   (selected file/folder) are substituted into the command parameters.
 - **Flexible icons** - a Segoe Fluent Icons glyph, an `.exe` / `.dll` / `.ico`
@@ -46,8 +49,8 @@ Explorer.
   utility, with your own label and icon.
 - **Custom item spacing** - set the exact spacing between the command bar
   buttons.
-- **Open menus on hover** - optionally open dropdowns on hover, with a
-  configurable delay.
+- **Open menus on hover** - optionally open dropdowns and the context menu on
+  hover, with a configurable delay.
 - **Rock solid** - buttons are re-applied automatically across tab switches,
   navigation, new tabs and new windows, and everything is cleanly restored when
   the mod is disabled.
@@ -90,6 +93,19 @@ The **Icon glyph or icon path** field accepts several forms:
 * **Empty** - the icon is extracted from the command's executable (app
   execution aliases such as `wt.exe` are resolved to their real target).
 * **Hide icon** - enable the toggle to show no icon at all.
+
+## Context menu item
+
+Enable **Add the context menu item** in the **Context menu item** settings
+group to append a button which expands File Explorer's real shell context menu.
+It shows the selected items' menu, or the current folder's background menu when
+nothing is selected. Shell extensions and nested entries such as *Open with*
+and *Send to* are supported, and Shift-click includes extended verbs.
+
+The **Let File Explorer show the menu** option is intended for Nilesoft Shell.
+Because Nilesoft replaces the menu from inside Explorer rather than exposing an
+`IContextMenu` handler, this option asks the active file list to display its own
+menu. In that mode Explorer chooses its position.
 
 ## Replace New to New+
 
@@ -493,6 +509,37 @@ a new tab or navigating to another folder makes them appear.
     Replace Explorer's New button with a New+ button which creates files and
     folders from your own templates, the way the PowerToys New+ utility does.
     The label and the icon of the button are up to you.
+- contextMenuItem:
+  - enabled: false
+    $name: Add the context menu item
+    $description: >-
+      Add another command bar item which opens the shell context menu of the
+      current selection or folder, like right-clicking in File Explorer.
+  - useNilesoftShell: false
+    $name: Let File Explorer show the menu (for Nilesoft Shell)
+    $description: >-
+      Ask the file list to show its own context menu instead of building the
+      classic shell menu. Enable this for Nilesoft Shell, which replaces the
+      menu from inside Explorer. The menu is positioned by Explorer and the
+      active selection or folder background automatically.
+  - showLabel: false
+    $name: Show the item label
+    $description: >-
+      Show the label next to the icon. When disabled, only the icon is shown
+      and the label becomes the tooltip.
+  - buttonLabel: Context menu
+    $name: Item label
+    $description: The label and tooltip of the context menu item.
+  - buttonIcon: ""
+    $name: Item icon glyph or icon path
+    $description: >-
+      Leave empty for the three dots glyph. Alternatively, enter a Segoe
+      Fluent Icons hex code point or an .exe, .dll or .ico path with an
+      optional icon index.
+  $name: Context menu item
+  $description: >-
+    Add a configurable item which expands the real File Explorer shell context
+    menu for the active tab.
 - openMenuOnHover: false
   $name: Open menus on hover
   $description: >-
@@ -615,6 +662,14 @@ struct NewPlusSettings {
     bool keepOriginalNewButton = false;
 };
 
+struct ContextMenuItemSettings {
+    bool enabled = false;
+    bool useNilesoftShell = false;
+    bool showLabel = false;
+    std::wstring buttonLabel = L"Context menu";
+    std::wstring buttonIcon;
+};
+
 struct {
     std::mutex mutex;
     bool openMenuOnHover = false;
@@ -626,6 +681,7 @@ struct {
     int itemSpacing = -1;
     std::vector<ActionItem> items;
     NewPlusSettings newPlus;
+    ContextMenuItemSettings contextMenuItem;
 } g_settings;
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -649,6 +705,7 @@ struct {
 #include <winrt/Microsoft.UI.Xaml.Automation.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.Primitives.h>
+#include <winrt/Microsoft.UI.Xaml.Documents.h>
 #include <winrt/Microsoft.UI.Xaml.Input.h>
 #include <winrt/Microsoft.UI.Xaml.Media.h>
 #include <winrt/Microsoft.UI.Xaml.Media.Imaging.h>
@@ -657,6 +714,7 @@ namespace wf = winrt::Windows::Foundation;
 namespace wfc = winrt::Windows::Foundation::Collections;
 namespace mux = winrt::Microsoft::UI::Xaml;
 namespace muxc = winrt::Microsoft::UI::Xaml::Controls;
+namespace muxd = winrt::Microsoft::UI::Xaml::Documents;
 namespace muxm = winrt::Microsoft::UI::Xaml::Media;
 
 #pragma endregion  // winrt_hpp
@@ -669,6 +727,7 @@ namespace muxm = winrt::Microsoft::UI::Xaml::Media;
 // a name of its own.
 constexpr PCWSTR kButtonNamePrefix = L"WindhawkActionButton";
 constexpr PCWSTR kNewPlusButtonName = L"WindhawkNewPlusButton";
+constexpr PCWSTR kContextMenuButtonName = L"WindhawkContextMenuButton";
 
 // Everything below is per-UI-thread state, and every XAML object in it belongs
 // to the thread that created it: a weak reference to a live non-agile XAML
@@ -989,6 +1048,353 @@ winrt::com_ptr<IShellView> GetActiveShellView(HWND hExplorerWnd) {
     }
 
     return nullptr;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// The shell context menu item.
+
+bool ShellViewHasSelection(winrt::com_ptr<IShellView> const& shellView) {
+    auto folderView = shellView.try_as<IFolderView>();
+    if (!folderView) {
+        return false;
+    }
+
+    int count = 0;
+    return SUCCEEDED(folderView->ItemCount(SVGIO_SELECTION, &count)) &&
+           count > 0;
+}
+
+struct FindWindowByClassParam {
+    PCWSTR className;
+    HWND result;
+};
+
+HWND FindDescendantWindow(HWND hParentWnd, PCWSTR className) {
+    FindWindowByClassParam param{className, nullptr};
+    EnumChildWindows(
+        hParentWnd,
+        [](HWND hWnd, LPARAM lParam) -> BOOL {
+            auto& param = *(FindWindowByClassParam*)lParam;
+            WCHAR buffer[64];
+            if (GetClassNameW(hWnd, buffer, ARRAYSIZE(buffer)) &&
+                _wcsicmp(buffer, param.className) == 0) {
+                param.result = hWnd;
+                return FALSE;
+            }
+            return TRUE;
+        },
+        (LPARAM)&param);
+    return param.result;
+}
+
+HWND FindShellViewWindow(HWND hExplorerWnd) {
+    HWND hTabWnd =
+        FindWindowExW(hExplorerWnd, nullptr, L"ShellTabWindowClass", nullptr);
+    if (hTabWnd) {
+        if (HWND hViewWnd = FindDescendantWindow(hTabWnd, L"SHELLDLL_DefView")) {
+            return hViewWnd;
+        }
+    }
+
+    return FindDescendantWindow(hExplorerWnd, L"SHELLDLL_DefView");
+}
+
+// Nilesoft Shell replaces the file list's context menu from inside Explorer,
+// so asking the view to show its own menu is the only way to invoke it.
+bool RequestShellViewContextMenu(HWND hExplorerWnd) {
+    HWND hViewWnd = FindShellViewWindow(hExplorerWnd);
+    if (!hViewWnd) {
+        Wh_Log(L"No shell view window for %08X", (DWORD)(ULONG_PTR)hExplorerWnd);
+        return false;
+    }
+
+    return PostMessageW(hViewWnd, WM_CONTEXTMENU, (WPARAM)hViewWnd,
+                        (LPARAM)-1) != FALSE;
+}
+
+winrt::com_ptr<IContextMenu> GetShellContextMenu(
+    HWND hExplorerWnd,
+    bool* isItemMenu) {
+    *isItemMenu = false;
+
+    auto shellView = GetActiveShellView(hExplorerWnd);
+    if (!shellView) {
+        Wh_Log(L"No shell view for window %08X", (DWORD)(ULONG_PTR)hExplorerWnd);
+        return nullptr;
+    }
+
+    *isItemMenu = ShellViewHasSelection(shellView);
+    UINT viewObject = *isItemMenu ? SVGIO_SELECTION : SVGIO_BACKGROUND;
+
+    winrt::com_ptr<IContextMenu> contextMenu;
+    HRESULT hr = shellView->GetItemObject(viewObject, __uuidof(IContextMenu),
+                                          contextMenu.put_void());
+    if (FAILED(hr) || !contextMenu) {
+        Wh_Log(L"GetItemObject(%u) failed: %08X", viewObject, hr);
+        return nullptr;
+    }
+
+    return contextMenu;
+}
+
+constexpr UINT kContextMenuFirstCmdId = 1;
+constexpr UINT kContextMenuLastCmdId = 0x7FFF;
+
+thread_local IContextMenu2* g_trackedContextMenu2;
+thread_local IContextMenu3* g_trackedContextMenu3;
+thread_local bool g_contextMenuIsOpen;
+std::atomic<int> g_openContextMenuCount;
+
+LRESULT CALLBACK ContextMenuOwnerWndProc(HWND hWnd,
+                                         UINT uMsg,
+                                         WPARAM wParam,
+                                         LPARAM lParam) {
+    switch (uMsg) {
+        case WM_INITMENUPOPUP:
+        case WM_DRAWITEM:
+        case WM_MEASUREITEM:
+            if (g_trackedContextMenu3) {
+                LRESULT result = 0;
+                if (SUCCEEDED(g_trackedContextMenu3->HandleMenuMsg2(
+                        uMsg, wParam, lParam, &result))) {
+                    return result;
+                }
+            } else if (g_trackedContextMenu2 &&
+                       SUCCEEDED(g_trackedContextMenu2->HandleMenuMsg(
+                           uMsg, wParam, lParam))) {
+                return uMsg == WM_INITMENUPOPUP ? 0 : TRUE;
+            }
+            break;
+
+        case WM_MENUCHAR:
+            if (g_trackedContextMenu3) {
+                LRESULT result = 0;
+                if (SUCCEEDED(g_trackedContextMenu3->HandleMenuMsg2(
+                        uMsg, wParam, lParam, &result)) &&
+                    result) {
+                    return result;
+                }
+            }
+            break;
+    }
+
+    return DefWindowProcW(hWnd, uMsg, wParam, lParam);
+}
+
+std::wstring ContextMenuOwnerClassName() {
+    return std::wstring(L"WindhawkContextMenuOwner_") + WH_MOD_ID;
+}
+
+std::atomic<bool> g_contextMenuOwnerClassRegistered;
+std::mutex g_contextMenuOwnersMutex;
+std::unordered_map<DWORD, HWND> g_contextMenuOwners;
+
+bool IsContextMenuOwnerWindow(DWORD threadId, HWND hWnd) {
+    if (!IsWindow(hWnd) || GetWindowThreadProcessId(hWnd, nullptr) != threadId) {
+        return false;
+    }
+
+    WCHAR className[128];
+    return GetClassNameW(hWnd, className, ARRAYSIZE(className)) &&
+           _wcsicmp(className, ContextMenuOwnerClassName().c_str()) == 0;
+}
+
+bool EnsureContextMenuOwnerClass() {
+    if (g_contextMenuOwnerClassRegistered) {
+        return true;
+    }
+
+    std::wstring className = ContextMenuOwnerClassName();
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = ContextMenuOwnerWndProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = className.c_str();
+    if (!RegisterClassExW(&wc) &&
+        GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+        Wh_Log(L"RegisterClassEx failed: %u", GetLastError());
+        return false;
+    }
+
+    g_contextMenuOwnerClassRegistered = true;
+    return true;
+}
+
+HWND EnsureContextMenuOwnerWindow() {
+    DWORD threadId = GetCurrentThreadId();
+    {
+        std::lock_guard<std::mutex> lock(g_contextMenuOwnersMutex);
+        auto it = g_contextMenuOwners.find(threadId);
+        if (it != g_contextMenuOwners.end() &&
+            IsContextMenuOwnerWindow(threadId, it->second)) {
+            return it->second;
+        }
+        if (it != g_contextMenuOwners.end()) {
+            g_contextMenuOwners.erase(it);
+        }
+    }
+
+    if (!EnsureContextMenuOwnerClass()) {
+        return nullptr;
+    }
+
+    HWND hWnd = CreateWindowExW(0, ContextMenuOwnerClassName().c_str(), nullptr,
+                                0, 0, 0, 0, 0, nullptr, nullptr,
+                                GetModuleHandleW(nullptr), nullptr);
+    if (!hWnd) {
+        Wh_Log(L"CreateWindowEx failed: %u", GetLastError());
+        return nullptr;
+    }
+
+    std::lock_guard<std::mutex> lock(g_contextMenuOwnersMutex);
+    g_contextMenuOwners[threadId] = hWnd;
+    return hWnd;
+}
+
+void DismissOpenContextMenus() {
+    if (g_openContextMenuCount == 0) {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_contextMenuOwnersMutex);
+        for (auto const& [threadId, hWnd] : g_contextMenuOwners) {
+            if (IsContextMenuOwnerWindow(threadId, hWnd)) {
+                PostMessageW(hWnd, WM_CANCELMODE, 0, 0);
+            }
+        }
+    }
+
+    for (int i = 0; i < 200 && g_openContextMenuCount > 0; i++) {
+        Sleep(10);
+    }
+}
+
+void DestroyContextMenuOwnerWindowForCurrentThread() {
+    if (g_contextMenuIsOpen) {
+        return;
+    }
+
+    HWND hWnd = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_contextMenuOwnersMutex);
+        auto it = g_contextMenuOwners.find(GetCurrentThreadId());
+        if (it == g_contextMenuOwners.end()) {
+            return;
+        }
+        hWnd = it->second;
+        g_contextMenuOwners.erase(it);
+    }
+
+    DestroyWindow(hWnd);
+}
+
+void InvokeShellContextMenuCommand(
+    winrt::com_ptr<IContextMenu> const& contextMenu,
+    UINT cmdId,
+    HWND hExplorerWnd,
+    POINT point) {
+    CMINVOKECOMMANDINFOEX info{};
+    info.cbSize = sizeof(info);
+    info.fMask = CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE;
+    info.hwnd = hExplorerWnd;
+    info.lpVerb = (LPCSTR)(UINT_PTR)(cmdId - kContextMenuFirstCmdId);
+    info.lpVerbW = (LPCWSTR)(UINT_PTR)(cmdId - kContextMenuFirstCmdId);
+    info.nShow = SW_SHOWNORMAL;
+    info.ptInvoke = point;
+    if (GetKeyState(VK_CONTROL) & 0x8000) {
+        info.fMask |= CMIC_MASK_CONTROL_DOWN;
+    }
+    if (GetKeyState(VK_SHIFT) & 0x8000) {
+        info.fMask |= CMIC_MASK_SHIFT_DOWN;
+    }
+
+    HRESULT hr = contextMenu->InvokeCommand((CMINVOKECOMMANDINFO*)&info);
+    if (FAILED(hr)) {
+        Wh_Log(L"InvokeCommand failed: %08X", hr);
+    }
+}
+
+void ShowShellContextMenu(HWND hExplorerWnd, POINT point) {
+    if (g_contextMenuIsOpen || g_unloading) {
+        return;
+    }
+
+    bool useNilesoftShell;
+    {
+        std::lock_guard<std::mutex> lock(g_settings.mutex);
+        useNilesoftShell = g_settings.contextMenuItem.useNilesoftShell;
+    }
+
+    if (useNilesoftShell && RequestShellViewContextMenu(hExplorerWnd)) {
+        return;
+    }
+
+    HWND hOwnerWnd = EnsureContextMenuOwnerWindow();
+    if (!hOwnerWnd) {
+        return;
+    }
+
+    HRESULT hrInit =
+        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    bool isItemMenu = false;
+    auto contextMenu = GetShellContextMenu(hExplorerWnd, &isItemMenu);
+    if (!contextMenu) {
+        if (hrInit == S_OK) {
+            CoUninitialize();
+        }
+        return;
+    }
+
+    HMENU hMenu = CreatePopupMenu();
+    if (!hMenu) {
+        if (hrInit == S_OK) {
+            CoUninitialize();
+        }
+        return;
+    }
+
+    UINT flags = isItemMenu ? CMF_CANRENAME : CMF_NORMAL;
+    if (GetKeyState(VK_SHIFT) & 0x8000) {
+        flags |= CMF_EXTENDEDVERBS;
+    }
+
+    HRESULT hr = contextMenu->QueryContextMenu(
+        hMenu, 0, kContextMenuFirstCmdId, kContextMenuLastCmdId, flags);
+    if (FAILED(hr)) {
+        Wh_Log(L"QueryContextMenu failed: %08X", hr);
+        DestroyMenu(hMenu);
+        if (hrInit == S_OK) {
+            CoUninitialize();
+        }
+        return;
+    }
+
+    auto contextMenu2 = contextMenu.try_as<IContextMenu2>();
+    auto contextMenu3 = contextMenu.try_as<IContextMenu3>();
+    g_trackedContextMenu2 = contextMenu2.get();
+    g_trackedContextMenu3 = contextMenu3.get();
+    g_contextMenuIsOpen = true;
+    g_openContextMenuCount++;
+
+    UINT cmdId = (UINT)TrackPopupMenuEx(
+        hMenu, TPM_RETURNCMD | TPM_LEFTBUTTON | TPM_RIGHTBUTTON | TPM_LEFTALIGN,
+        point.x, point.y, hOwnerWnd, nullptr);
+
+    g_openContextMenuCount--;
+    g_contextMenuIsOpen = false;
+    g_trackedContextMenu2 = nullptr;
+    g_trackedContextMenu3 = nullptr;
+
+    if (cmdId >= kContextMenuFirstCmdId &&
+        cmdId <= kContextMenuLastCmdId && !g_unloading) {
+        InvokeShellContextMenuCommand(contextMenu, cmdId, hExplorerWnd, point);
+    }
+
+    DestroyMenu(hMenu);
+    if (hrInit == S_OK) {
+        CoUninitialize();
+    }
 }
 
 // The folder and the selection of the given window's active tab. Always used
@@ -2348,14 +2754,15 @@ bool IsOurNewPlusButton(muxc::ICommandBarElement const& command) {
 }
 
 bool IsOurElement(muxc::ICommandBarElement const& command) {
-    // Matches our action buttons and their separators, plus the New+ button.
+    // Matches our action buttons and their separators, plus the special items.
     auto element = command.try_as<mux::FrameworkElement>();
     if (!element) {
         return false;
     }
 
     std::wstring_view name{element.Name()};
-    return name.starts_with(kButtonNamePrefix) || name == kNewPlusButtonName;
+    return name.starts_with(kButtonNamePrefix) || name == kNewPlusButtonName ||
+           name == kContextMenuButtonName;
 }
 
 // True if the command bar holds any of the elements the given predicate matches.
@@ -3311,6 +3718,65 @@ muxc::AppBarButton CreateMenuButton(ActionItem const& item,
     return button;
 }
 
+void OpenContextMenuForElement(mux::FrameworkElement const& element) {
+    if (g_unloading || !element) {
+        return;
+    }
+
+    HWND hExplorerWnd = GetExplorerWindowForElement(element);
+    if (!hExplorerWnd) {
+        Wh_Log(L"No File Explorer window for the context menu item");
+        return;
+    }
+
+    POINT point{};
+    GetCursorPos(&point);
+    ShowShellContextMenu(hExplorerWnd, point);
+}
+
+muxc::AppBarButton CreateContextMenuButton(bool openOnHover,
+                                            int hoverDelayMs) {
+    ContextMenuItemSettings settings;
+    {
+        std::lock_guard<std::mutex> lock(g_settings.mutex);
+        settings = g_settings.contextMenuItem;
+    }
+
+    muxc::AppBarButton button;
+    button.Name(kContextMenuButtonName);
+    button.Label(settings.buttonLabel.c_str());
+    button.LabelPosition(settings.showLabel
+                             ? muxc::CommandBarLabelPosition::Default
+                             : muxc::CommandBarLabelPosition::Collapsed);
+    button.Icon(CreateIconElement(settings.buttonIcon, std::wstring(),
+                                  L"\uE712"));
+
+    if (!settings.showLabel && !settings.buttonLabel.empty()) {
+        muxc::ToolTipService::SetToolTip(
+            button, winrt::box_value(winrt::hstring{settings.buttonLabel}));
+    }
+
+    TrackRevoker(
+        button,
+        button.Click(
+            winrt::auto_revoke,
+            [](wf::IInspectable const& sender, mux::RoutedEventArgs const&) {
+                OpenContextMenuForElement(
+                    sender.try_as<mux::FrameworkElement>());
+            }));
+
+    if (openOnHover) {
+        auto open = [weakButton = winrt::make_weak(button)]() {
+            if (auto button = weakButton.get()) {
+                OpenContextMenuForElement(button);
+            }
+        };
+        SetUpOpenOnHover(button, hoverDelayMs, open);
+    }
+
+    return button;
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // The New+ button, which takes the place of Explorer's New button.
 
@@ -3419,6 +3885,40 @@ void PopulateNewPlusMenu(
     Wh_Log(L"Error %08X", winrt::to_hresult().value);
 }
 
+void AddNewPlusChevron(muxc::AppBarButton const& button) try {
+    auto label =
+        FindDescendantByName(button, L"TextLabel").try_as<muxc::TextBlock>();
+    if (!label) {
+        Wh_Log(L"The New+ label wasn't found");
+        return;
+    }
+
+    std::wstring currentText = label.Text().c_str();
+    if (!currentText.empty() && currentText.back() == L'\uE70D') {
+        return;
+    }
+
+    // Use a separate text run so the label keeps Explorer's normal typeface
+    // while the chevron is rendered as the Segoe Fluent Icons ChevronDown
+    // symbol, just like the built-in New button.
+    auto inlines = label.Inlines();
+    inlines.Clear();
+
+    muxd::Run text;
+    std::wstring labelText = button.Label().c_str();
+    labelText += L"  ";
+    text.Text(labelText);
+    inlines.Append(text);
+
+    muxd::Run chevron;
+    chevron.Text(L"\uE70D");
+    chevron.FontFamily(muxm::FontFamily(L"Segoe Fluent Icons"));
+    chevron.FontSize(8);
+    inlines.Append(chevron);
+} catch (...) {
+    Wh_Log(L"Error %08X", winrt::to_hresult().value);
+}
+
 muxc::AppBarButton CreateNewPlusButton(std::wstring const& originalIconUri,
                                        bool openOnHover,
                                        int hoverDelayMs) {
@@ -3428,9 +3928,9 @@ muxc::AppBarButton CreateNewPlusButton(std::wstring const& originalIconUri,
         settings = g_settings.newPlus;
     }
 
-    // The label is what puts the chevron next to the text, the way Explorer's
-    // own New button looks. Without a label there's nothing for a chevron to
-    // follow, so only the icon is shown and the text becomes the tooltip.
+    // Explorer's command-bar template doesn't add a flyout indicator to an
+    // AppBarButton automatically. Without a label, only the icon is shown and
+    // the text becomes the tooltip.
     bool showLabel = settings.showLabel && !settings.buttonLabel.empty();
 
     muxc::AppBarButton button;
@@ -3441,6 +3941,18 @@ muxc::AppBarButton CreateNewPlusButton(std::wstring const& originalIconUri,
                              : muxc::CommandBarLabelPosition::Collapsed);
     button.Icon(
         MakeNewPlusButtonIcon(settings.buttonIcon, originalIconUri));
+
+    if (showLabel) {
+        TrackRevoker(
+            button,
+            button.Loaded(
+                winrt::auto_revoke,
+                [](wf::IInspectable const& sender, mux::RoutedEventArgs const&) {
+                    if (auto button = sender.try_as<muxc::AppBarButton>()) {
+                        AddNewPlusChevron(button);
+                    }
+                }));
+    }
 
     // With the label visible there's nothing a tooltip could add.
     if (!showLabel && !settings.buttonLabel.empty()) {
@@ -3530,6 +4042,30 @@ void EnsureActionButtons(muxc::CommandBar const& commandBar) {
     }
 }
 
+void EnsureContextMenuButton(muxc::CommandBar const& commandBar) {
+    bool enabled;
+    bool openMenuOnHover;
+    int menuHoverDelay;
+    {
+        std::lock_guard<std::mutex> lock(g_settings.mutex);
+        enabled = g_settings.contextMenuItem.enabled;
+        openMenuOnHover = g_settings.openMenuOnHover;
+        menuHoverDelay = g_settings.menuHoverDelay;
+    }
+
+    if (!enabled ||
+        HasElement(commandBar, [](muxc::ICommandBarElement const& command) {
+            auto element = command.try_as<mux::FrameworkElement>();
+            return element && element.Name() == kContextMenuButtonName;
+        })) {
+        return;
+    }
+
+    Wh_Log(L"Adding the context menu item");
+    commandBar.PrimaryCommands().Append(
+        CreateContextMenuButton(openMenuOnHover, menuHoverDelay));
+}
+
 // Puts the New+ button where Explorer's New button is. The latter is collapsed
 // by ApplyDefaultButtonVisibility, which asks ShouldHide - and that returns true
 // for the New button while the New+ button is enabled.
@@ -3597,6 +4133,7 @@ void UpdateCommandBar(muxc::CommandBar const& commandBar) {
     if (commandBar.Name() == L"FileExplorerCommandBar") {
         EnsureNewPlusButton(commandBar);
         EnsureActionButtons(commandBar);
+        EnsureContextMenuButton(commandBar);
     }
 
     ApplyDefaultButtonVisibility(commandBar);
@@ -3711,6 +4248,7 @@ void RemoveButtonsForCurrentThread() {
     ForgetManagedElementsForCurrentThread();
     g_pendingUpdates.clear();
     g_threadScanned = false;
+    DestroyContextMenuOwnerWindowForCurrentThread();
 }
 
 void RefreshButtonsForCurrentThread() {
@@ -4368,6 +4906,21 @@ void LoadSettings() {
     g_settings.newPlus.keepOriginalNewButton =
         Wh_GetIntSetting(L"newPlus.keepOriginalNewButton") != 0;
 
+    g_settings.contextMenuItem = ContextMenuItemSettings{};
+    g_settings.contextMenuItem.enabled =
+        Wh_GetIntSetting(L"contextMenuItem.enabled") != 0;
+
+    g_settings.contextMenuItem.useNilesoftShell =
+        Wh_GetIntSetting(L"contextMenuItem.useNilesoftShell") != 0;
+    g_settings.contextMenuItem.showLabel =
+        Wh_GetIntSetting(L"contextMenuItem.showLabel") != 0;
+    g_settings.contextMenuItem.buttonLabel =
+        WindhawkUtils::StringSetting::make(
+            L"contextMenuItem.buttonLabel").get();
+    g_settings.contextMenuItem.buttonIcon = TrimQuotesAndSpaces(
+        WindhawkUtils::StringSetting::make(
+            L"contextMenuItem.buttonIcon").get());
+
     g_settings.items.clear();
     for (int i = 0; i < 100; i++) {
         WCHAR prefix[64];
@@ -4441,6 +4994,8 @@ void Wh_ModUninit() {
 
     g_unloading = true;
 
+    DismissOpenContextMenus();
+
     for (HWND hWnd : GetFileExplorerWnds()) {
         Wh_Log(L"Removing buttons for window %08X", (DWORD)(ULONG_PTR)hWnd);
         if (!RunFromWindowThread(
@@ -4457,6 +5012,28 @@ void Wh_ModUninit() {
     {
         std::lock_guard<std::mutex> lock(g_iconCacheMutex);
         g_iconCache.clear();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_contextMenuOwnersMutex);
+        for (auto it = g_contextMenuOwners.begin();
+             it != g_contextMenuOwners.end();) {
+            if (!IsContextMenuOwnerWindow(it->first, it->second)) {
+                it = g_contextMenuOwners.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        if (g_contextMenuOwners.empty() &&
+            g_contextMenuOwnerClassRegistered) {
+            UnregisterClassW(ContextMenuOwnerClassName().c_str(),
+                             GetModuleHandleW(nullptr));
+            g_contextMenuOwnerClassRegistered = false;
+        } else if (!g_contextMenuOwners.empty()) {
+            Wh_Log(L"%zu context menu owner windows left behind",
+                   g_contextMenuOwners.size());
+        }
     }
 
     // Last, since the launch threads run our code: the DLL can't be unmapped

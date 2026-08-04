@@ -14,6 +14,9 @@ Designed for Windows 11 24H2 / 25H2 with the WinAppSDK (WinUI 3) File Explorer.
   command of your choice.
 - **Dropdown menus & submenus** — a button can open a menu, and menu entries
   can themselves be submenus (three levels deep).
+- **Shell context menu item** — optionally add an item which opens the real
+  context menu of the active selection or folder, including shell extensions
+  and optional Nilesoft Shell support.
 - **Path & selection placeholders** — `%path%` (active tab folder) and `%sel%`
   (selected file/folder) are substituted into the command parameters.
 - **Flexible icons** — a Segoe Fluent Icons glyph, an `.exe` / `.dll` / `.ico`
@@ -30,8 +33,8 @@ Designed for Windows 11 24H2 / 25H2 with the WinAppSDK (WinUI 3) File Explorer.
   [Replace New to New+](#replace-new-to-new)).
 - **Custom item spacing** — set the exact spacing between the command bar
   buttons, in pixels.
-- **Open menus on hover** — optionally open dropdowns on hover, with a
-  configurable delay. Applies to the New+ button as well.
+- **Open menus on hover** — optionally open dropdowns and the context menu on
+  hover, with a configurable delay. Applies to the New+ button as well.
 - **Rock solid** — buttons are re‑applied automatically across tab switches,
   navigation, new tabs and new windows, and everything is cleanly restored when
   the mod is disabled.
@@ -77,6 +80,19 @@ The **Icon glyph or icon path** field accepts several forms:
 * **Empty** — the icon is extracted from the command's executable (app
   execution aliases such as `wt.exe` are resolved to their real target).
 * **Hide icon** — enable the toggle to show no icon at all.
+
+## Context menu item
+
+Enable **Add the context menu item** in the **Context menu item** settings
+group to append a button which expands File Explorer's real shell context menu.
+It shows the selected items' menu, or the current folder's background menu when
+nothing is selected. Shell extensions and nested entries such as *Open with*
+and *Send to* are supported, and Shift-click includes extended verbs.
+
+The **Let File Explorer show the menu** option is intended for Nilesoft Shell.
+Because Nilesoft replaces the menu from inside Explorer rather than exposing an
+`IContextMenu` handler, this option asks the active file list to display its own
+menu. In that mode Explorer chooses its position.
 
 ## Replace New to New+
 
