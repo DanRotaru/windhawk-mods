@@ -20,7 +20,7 @@ Add your own buttons and dropdown menus to the **Windows 11 File Explorer
 command bar** (the toolbar with New / Sort / View), and hide the built-in
 buttons, separators and spacing you don't want.
 
-![Explorer Command Bar demo](https://raw.githubusercontent.com/DanRotaru/windhawk-mods/master/exporer-command-bar/screenshots/main.gif)
+![Explorer Command Bar demo](https://raw.githubusercontent.com/DanRotaru/windhawk-mods/master/explorer-command-bar/screenshots/main.gif)
 
 Designed for Windows 11 24H2 / 25H2 with the WinAppSDK (WinUI 3) File
 Explorer.
@@ -59,11 +59,11 @@ Explorer.
 
 Hiding built‑in buttons and separators:
 
-![Hide buttons](https://raw.githubusercontent.com/DanRotaru/windhawk-mods/master/exporer-command-bar/screenshots/hide-buttons.gif)
+![Hide buttons](https://raw.githubusercontent.com/DanRotaru/windhawk-mods/master/explorer-command-bar/screenshots/hide-buttons.gif)
 
 You may hide even all options, and use only your custom ones:
 
-![Hide All buttons](https://raw.githubusercontent.com/DanRotaru/windhawk-mods/master/exporer-command-bar/screenshots/hide-all-buttons.jpg)
+![Hide All buttons](https://raw.githubusercontent.com/DanRotaru/windhawk-mods/master/explorer-command-bar/screenshots/hide-all-buttons.jpg)
 
 ## Command parameters
 
