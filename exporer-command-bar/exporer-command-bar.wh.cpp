@@ -1,14 +1,14 @@
 // ==WindhawkMod==
 // @id              explorer-command-bar
 // @name            Explorer Command Bar
-// @description     Add your own buttons and dropdown menus to the Windows 11 File Explorer command bar, and hide the built-in ones
-// @version         1.0.1
+// @description     Add your own buttons and dropdown menus to the Windows 11 File Explorer command bar, replace New with New+, and hide the built-in ones
+// @version         1.1.0
 // @author          DanRotaru
 // @github          https://github.com/DanRotaru
 // @homepage        https://dan13.me/
 // @include         explorer.exe
 // @architecture    x86-64
-// @compilerOptions -ladvapi32 -lgdi32 -lole32 -loleaut32 -lruntimeobject -lshell32
+// @compilerOptions -ladvapi32 -lgdi32 -lole32 -loleaut32 -lruntimeobject -lshell32 -lshlwapi
 // @license         MIT
 // ==/WindhawkMod==
 
@@ -40,6 +40,10 @@ Explorer.
   Share, Delete, Sort, View, the group separators, the "See more" (…) overflow
   menu, the contextual commands (Set as background, Rotate left, Rotate right,
   Extract all) and the Details pane toggle.
+- **Replace New with New+** - turn Explorer's New button into a *New+* button
+  which lists the templates of the
+  [PowerToys **New+**](https://learn.microsoft.com/en-us/windows/powertoys/newplus)
+  utility, with your own label and icon.
 - **Custom item spacing** - set the exact spacing between the command bar
   buttons.
 - **Open menus on hover** - optionally open dropdowns on hover, with a
@@ -87,6 +91,56 @@ The **Icon glyph or icon path** field accepts several forms:
   execution aliases such as `wt.exe` are resolved to their real target).
 * **Hide icon** - enable the toggle to show no icon at all.
 
+## Replace New to New+
+
+The **Replace New to New+** group turns Explorer's own **New** button into a
+*New+* button: instead of Explorer's fixed list of file types, the dropdown
+lists the templates of the
+[PowerToys **New+**](https://learn.microsoft.com/en-us/windows/powertoys/newplus)
+utility, and clicking one creates a copy of it in the current folder, selected
+and ready to be renamed.
+
+PowerToys is **not** required: the mod copies the templates itself and never
+talks to the New+ shell extension. It only reads PowerToys' New+ settings file
+(if there is one) to find the templates folder and the *Hide file extension* /
+*Hide starting digits* / *Replace variables* options. Without PowerToys the New+
+defaults are used: templates are read from
+`%LOCALAPPDATA%\Microsoft\PowerToys\NewPlus\Templates`, extensions and starting
+digits are hidden, and variables are not replaced. Any folder can be used
+instead via the **Templates folder** setting.
+
+Every file and folder directly inside the templates folder becomes a menu entry
+(hidden and system files, and `desktop.ini`, are skipped). Folder templates are
+listed first, then files, in the order File Explorer itself would list them, and
+if the name is already taken ` (2)`, ` (3)`, … is appended. The menu is built
+when it's opened, so templates added or removed in the meantime show up without
+reloading anything.
+
+The button takes the place of Explorer's New button, which is collapsed (and can
+be kept visible). Its **label** and **icon** are configurable: with a label the
+familiar chevron (˅) is drawn after the text, and with an empty label - or with
+the label turned off - only the icon is shown, without a chevron. An empty icon
+setting reuses the icon of Explorer's own New button.
+
+### Filename variables
+
+When *Replace variables* is enabled in PowerToys, these are substituted in the
+name of the created copy:
+
+| Variable | Meaning |
+| --- | --- |
+| `$YYYY` | Year, four digits |
+| `$YY` | Year, two digits |
+| `$MM` | Month, two digits |
+| `$DD` | Day, two digits |
+| `$hh` | Hour, two digits (24h) |
+| `$mm` | Minute, two digits |
+| `$ss` | Second, two digits |
+| `$PARENT_FOLDER_NAME` | Name of the folder the item is created in |
+
+Unlike New+, variables are replaced in the file *name* only, never inside the
+file contents.
+
 ## Default configuration
 
 Out of the box the mod adds:
@@ -103,8 +157,8 @@ Out of the box the mod adds:
 
 Items whose command isn't installed simply do nothing when clicked (the failure
 is written to the mod log), so remove the ones you don't need and add your own.
-All of the built-in buttons stay visible by default. Everything is configurable
-in the mod settings.
+All of the built-in buttons stay visible by default, and the New+ button is
+turned off. Everything is configurable in the mod settings.
 
 ## How it works
 
@@ -115,6 +169,10 @@ buttons are then inserted and the visibility / spacing settings are applied. The
 mod also listens for the command bar being rebuilt so the buttons stay in place
 across navigation, new tabs and new windows, and it restores the original state
 of any element it touches when disabled.
+
+The active tab's folder and selection are resolved through `IShellWindows` /
+`IShellBrowser`, off the UI thread, so a slow or unresponsive shell can't block
+the command bar.
 
 Notably, the mod does **not** use XAML Diagnostics
 (`InitializeXamlDiagnosticsEx`), since only one XAML diagnostics consumer can be
@@ -380,10 +438,66 @@ a new tab or navigating to another folder makes them appear.
     separator of the contextual commands (Set as background, Rotate left,
     Rotate right, Extract all) is hidden along with them, once none of them is
     left to show.
+- newPlus:
+  - enabled: false
+    $name: Replace New with New+
+    $description: >-
+      Put a New+ button in the place of Explorer's New button. Its dropdown
+      lists the templates of the PowerToys New+ utility instead of Explorer's
+      fixed list of file types, and clicking one creates a copy of it in the
+      current folder. PowerToys isn't required - the mod copies the templates
+      itself and only reads PowerToys' New+ settings, if there are any.
+  - showLabel: true
+    $name: Show the button label
+    $description: >-
+      Show the label next to the icon, the way Explorer's own New button does,
+      with a chevron after the text. When disabled, only the icon is shown, no
+      chevron is drawn, and the label becomes the button's tooltip.
+  - buttonLabel: New
+    $name: Button label
+    $description: >-
+      The text of the button, also used as its tooltip when the label is
+      hidden. Leave empty for an icon-only button without a chevron.
+  - buttonIcon: ""
+    $name: Button icon glyph or icon path
+    $description: >-
+      Leave empty to reuse the icon of Explorer's own New button.
+      Alternatively, a hex code point of a Segoe Fluent Icons glyph, e.g. E710
+      (https://learn.microsoft.com/en-us/windows/apps/design/iconography/segoe-fluent-icons-font),
+      or a path to an .exe, .dll or .ico file, optionally with an icon index,
+      e.g. C:\Windows\System32\shell32.dll,3.
+  - templateFolder: ""
+    $name: Templates folder
+    $description: >-
+      The folder to read the templates from. Leave empty to use the folder
+      configured in PowerToys, or the New+ default location
+      (%LOCALAPPDATA%\Microsoft\PowerToys\NewPlus\Templates) if PowerToys isn't
+      installed.
+  - showIcons: true
+    $name: Show template icons
+    $description: >-
+      Show the shell icon of each template in the menu. Disable it if opening
+      the menu feels slow with many templates.
+  - showTemplatesFolderItem: true
+    $name: Add an "Open templates folder" entry
+    $description: >-
+      Append an entry which opens the templates folder, creating it if it
+      doesn't exist yet.
+  - keepOriginalNewButton: false
+    $name: Keep Explorer's New button
+    $description: >-
+      Show the built-in New button next to the New+ button instead of hiding
+      it.
+  $name: Replace New to New+
+  $description: >-
+    Replace Explorer's New button with a New+ button which creates files and
+    folders from your own templates, the way the PowerToys New+ utility does.
+    The label and the icon of the button are up to you.
 - openMenuOnHover: false
   $name: Open menus on hover
   $description: >-
     Open dropdown menus by hovering over the button instead of clicking it.
+    Applies to the New+ button as well.
 - menuHoverDelay: 400
   $name: Hover delay (milliseconds)
   $description: >-
@@ -409,8 +523,10 @@ a new tab or navigating to another folder makes them appear.
 #include <servprov.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <shlwapi.h>
 #include <shobjidl.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -487,6 +603,18 @@ constexpr int kDeleteButtonIndex = 6;
 constexpr int kSortButtonIndex = 7;
 constexpr int kViewButtonIndex = 8;
 
+// The New+ button which takes the place of Explorer's New button.
+struct NewPlusSettings {
+    bool enabled = false;
+    bool showLabel = true;
+    std::wstring buttonLabel = L"New";
+    std::wstring buttonIcon;
+    std::wstring templateFolder;
+    bool showIcons = true;
+    bool showTemplatesFolderItem = true;
+    bool keepOriginalNewButton = false;
+};
+
 struct {
     std::mutex mutex;
     bool openMenuOnHover = false;
@@ -497,6 +625,7 @@ struct {
     bool hideDetailsButton = false;
     int itemSpacing = -1;
     std::vector<ActionItem> items;
+    NewPlusSettings newPlus;
 } g_settings;
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -535,7 +664,11 @@ namespace muxm = winrt::Microsoft::UI::Xaml::Media;
 // clang-format on
 ////////////////////////////////////////////////////////////////////////////////
 
+// Our own elements are recognized by their name. The action buttons and their
+// separators share a prefix (the index of the item follows), the New+ button has
+// a name of its own.
 constexpr PCWSTR kButtonNamePrefix = L"WindhawkActionButton";
+constexpr PCWSTR kNewPlusButtonName = L"WindhawkNewPlusButton";
 
 // Everything below is per-UI-thread state, and every XAML object in it belongs
 // to the thread that created it: a weak reference to a live non-agile XAML
@@ -671,7 +804,11 @@ ManagedElement& GetManagedElement(mux::UIElement const& element) {
 // its icon.
 
 std::wstring ExpandEnvVars(std::wstring const& str) {
-    WCHAR buffer[MAX_PATH];
+    if (str.empty()) {
+        return str;
+    }
+
+    WCHAR buffer[MAX_PATH * 2];
     DWORD length =
         ExpandEnvironmentStringsW(str.c_str(), buffer, ARRAYSIZE(buffer));
     if (length == 0 || length > ARRAYSIZE(buffer)) {
@@ -679,6 +816,45 @@ std::wstring ExpandEnvVars(std::wstring const& str) {
     }
 
     return buffer;
+}
+
+std::wstring ToLower(std::wstring str) {
+    for (auto& c : str) {
+        c = towlower(c);
+    }
+
+    return str;
+}
+
+std::wstring TrimQuotesAndSpaces(std::wstring str) {
+    size_t first = str.find_first_not_of(L" \t");
+    if (first == std::wstring::npos) {
+        return std::wstring();
+    }
+
+    size_t last = str.find_last_not_of(L" \t");
+    str = str.substr(first, last - first + 1);
+
+    if (str.size() >= 2 && str.front() == L'"' && str.back() == L'"') {
+        str = str.substr(1, str.size() - 2);
+    }
+
+    return str;
+}
+
+std::wstring JoinPath(std::wstring const& folder, std::wstring const& name) {
+    std::wstring result = folder;
+    if (!result.empty() && result.back() != L'\\' && result.back() != L'/') {
+        result += L'\\';
+    }
+
+    return result + name;
+}
+
+bool DirectoryExists(std::wstring const& path) {
+    DWORD attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+           (attributes & FILE_ATTRIBUTE_DIRECTORY);
 }
 
 // Resolves a bare executable name to a full path the way ShellExecute does:
@@ -699,11 +875,7 @@ std::wstring ResolveCommandPath(std::wstring const& command) {
     std::wstring keyPath =
         L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\" +
         expanded;
-    std::wstring lower = expanded;
-    for (auto& c : lower) {
-        c = towlower(c);
-    }
-    if (!lower.ends_with(L".exe")) {
+    if (!ToLower(expanded).ends_with(L".exe")) {
         keyPath += L".exe";
     }
 
@@ -731,20 +903,22 @@ std::wstring ResolveCommandPath(std::wstring const& command) {
 ////////////////////////////////////////////////////////////////////////////////
 // Getting the current folder path and launching commands.
 
+// What the active tab of a File Explorer window is showing. The shell view is
+// only used by the New+ button, to select and rename the item it creates.
 struct ExplorerContext {
     std::wstring folderPath;
     std::wstring selectedPath;
+    winrt::com_ptr<IShellView> shellView;
 };
 
-ExplorerContext GetExplorerContext(HWND hExplorerWnd) {
-    ExplorerContext result;
-
+// The shell view of the given File Explorer window's active tab.
+winrt::com_ptr<IShellView> GetActiveShellView(HWND hExplorerWnd) {
     winrt::com_ptr<IShellWindows> shellWindows;
     HRESULT hr = CoCreateInstance(kCLSID_ShellWindows, nullptr, CLSCTX_ALL,
                                   IID_PPV_ARGS(shellWindows.put()));
     if (FAILED(hr) || !shellWindows) {
         Wh_Log(L"CoCreateInstance(ShellWindows) failed: %08X", hr);
-        return result;
+        return nullptr;
     }
 
     long count = 0;
@@ -757,7 +931,7 @@ ExplorerContext GetExplorerContext(HWND hExplorerWnd) {
                                      L"ShellTabWindowClass", nullptr)
                      : nullptr;
 
-    for (long i = 0; i < count && result.folderPath.empty(); i++) {
+    for (long i = 0; i < count; i++) {
         VARIANT index;
         VariantInit(&index);
         index.vt = VT_I4;
@@ -808,50 +982,55 @@ ExplorerContext GetExplorerContext(HWND hExplorerWnd) {
         }
 
         winrt::com_ptr<IShellView> shellView;
-        if (FAILED(shellBrowser->QueryActiveShellView(shellView.put())) ||
-            !shellView) {
-            continue;
+        if (SUCCEEDED(shellBrowser->QueryActiveShellView(shellView.put())) &&
+            shellView) {
+            return shellView;
         }
+    }
 
-        auto folderView = shellView.try_as<IFolderView>();
-        if (!folderView) {
-            continue;
-        }
+    return nullptr;
+}
 
+// The folder and the selection of the given window's active tab. Always used
+// from a worker thread, so the shell calls it makes can take their time.
+ExplorerContext GetExplorerContext(HWND hExplorerWnd) {
+    ExplorerContext result;
+
+    result.shellView = GetActiveShellView(hExplorerWnd);
+    if (!result.shellView) {
+        return result;
+    }
+
+    if (auto folderView = result.shellView.try_as<IFolderView>()) {
         winrt::com_ptr<IPersistFolder2> persistFolder;
-        if (FAILED(folderView->GetFolder(IID_PPV_ARGS(persistFolder.put()))) ||
-            !persistFolder) {
-            continue;
-        }
-
         LPITEMIDLIST pidl = nullptr;
-        if (FAILED(persistFolder->GetCurFolder(&pidl)) || !pidl) {
-            continue;
+        if (SUCCEEDED(
+                folderView->GetFolder(IID_PPV_ARGS(persistFolder.put()))) &&
+            persistFolder &&
+            SUCCEEDED(persistFolder->GetCurFolder(&pidl)) && pidl) {
+            WCHAR path[MAX_PATH];
+            if (SHGetPathFromIDListEx(pidl, path, ARRAYSIZE(path),
+                                      GPFIDL_DEFAULT)) {
+                result.folderPath = path;
+            }
+
+            CoTaskMemFree(pidl);
         }
+    }
 
-        WCHAR path[MAX_PATH];
-        if (SHGetPathFromIDListEx(pidl, path, ARRAYSIZE(path),
-                                  GPFIDL_DEFAULT)) {
-            result.folderPath = path;
-        }
-
-        CoTaskMemFree(pidl);
-
-        // The first selected file or folder, if any.
-        winrt::com_ptr<IShellItemArray> selection;
-        if (SUCCEEDED(shellView->GetItemObject(
-                SVGIO_SELECTION, IID_PPV_ARGS(selection.put()))) &&
-            selection) {
-            winrt::com_ptr<IShellItem> shellItem;
-            if (SUCCEEDED(selection->GetItemAt(0, shellItem.put())) &&
-                shellItem) {
-                PWSTR selectedPath = nullptr;
-                if (SUCCEEDED(shellItem->GetDisplayName(
-                        SIGDN_FILESYSPATH, &selectedPath)) &&
-                    selectedPath) {
-                    result.selectedPath = selectedPath;
-                    CoTaskMemFree(selectedPath);
-                }
+    // The first selected file or folder, if any.
+    winrt::com_ptr<IShellItemArray> selection;
+    if (SUCCEEDED(result.shellView->GetItemObject(
+            SVGIO_SELECTION, IID_PPV_ARGS(selection.put()))) &&
+        selection) {
+        winrt::com_ptr<IShellItem> shellItem;
+        if (SUCCEEDED(selection->GetItemAt(0, shellItem.put())) && shellItem) {
+            PWSTR selectedPath = nullptr;
+            if (SUCCEEDED(shellItem->GetDisplayName(SIGDN_FILESYSPATH,
+                                                    &selectedPath)) &&
+                selectedPath) {
+                result.selectedPath = selectedPath;
+                CoTaskMemFree(selectedPath);
             }
         }
     }
@@ -938,6 +1117,42 @@ void WaitForLaunchThreads() {
     }
 }
 
+// Runs shell work on a tracked worker thread with an apartment of its own. Used
+// for everything which must not happen on the Explorer UI thread: launching a
+// command, copying a template, opening a folder. Note that the shell objects
+// involved are owned by the Explorer UI thread, so the calls marshal back to it;
+// only the waiting happens elsewhere.
+void RunShellWorkOnWorkerThread(std::function<void()> work) {
+    auto params = std::make_unique<std::function<void()>>(std::move(work));
+
+    HANDLE thread = CreateThread(
+        nullptr, 0,
+        [](LPVOID lpParam) -> DWORD {
+            std::unique_ptr<std::function<void()>> work(
+                reinterpret_cast<std::function<void()>*>(lpParam));
+
+            HRESULT hrInit = CoInitializeEx(
+                nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+            try {
+                (*work)();
+            } catch (...) {
+                Wh_Log(L"Error %08X", winrt::to_hresult().value);
+            }
+            if (SUCCEEDED(hrInit)) {
+                CoUninitialize();
+            }
+
+            return 0;
+        },
+        params.get(), 0, nullptr);
+    if (thread) {
+        params.release();  // Owned by the thread now.
+        // The handle is closed once the thread finished, either here on a later
+        // call or in Wh_ModUninit, which waits for it.
+        TrackLaunchThread(thread);
+    }
+}
+
 void LaunchItemForWindow(HWND hExplorerWnd, ActionItem const& item) {
     ExplorerContext context = GetExplorerContext(hExplorerWnd);
     Wh_Log(L"Launching %s for window %08X, path: %s, selection: %s",
@@ -978,16 +1193,14 @@ void LaunchItemForWindow(HWND hExplorerWnd, ActionItem const& item) {
     }
 }
 
-void OnActionInvoked(mux::FrameworkElement const& elementForWindow,
-                     ActionItem const& item) {
-    if (item.command.empty() || g_unloading) {
-        return;
-    }
-
+// The File Explorer window an element of ours belongs to. Note that a menu
+// flyout lives in its own popup window, so the element to ask has to be the
+// anchor button, not the clicked menu item.
+HWND GetExplorerWindowForElement(mux::FrameworkElement const& element) {
     HWND hWnd = nullptr;
 
     try {
-        if (auto xamlRoot = elementForWindow.XamlRoot()) {
+        if (auto xamlRoot = element.XamlRoot()) {
             if (auto environment = xamlRoot.ContentIslandEnvironment()) {
                 hWnd = (HWND)(uintptr_t)environment.AppWindowId().Value;
             }
@@ -1009,39 +1222,594 @@ void OnActionInvoked(mux::FrameworkElement const& elementForWindow,
         hWnd = GetAncestor(hWnd, GA_ROOT);
     }
 
-    struct LaunchParams {
-        HWND hExplorerWnd;
-        ActionItem item;
+    return hWnd;
+}
+
+void OnActionInvoked(mux::FrameworkElement const& elementForWindow,
+                     ActionItem const& item) {
+    if (item.command.empty() || g_unloading) {
+        return;
+    }
+
+    HWND hWnd = GetExplorerWindowForElement(elementForWindow);
+
+    // Off the UI thread, so a slow or unresponsive shell can't block the click
+    // handler.
+    RunShellWorkOnWorkerThread(
+        [hWnd, item]() { LaunchItemForWindow(hWnd, item); });
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// PowerToys' New+ configuration, for the New+ button.
+//
+// The settings file is small and its shape is stable, so instead of pulling in a
+// JSON parser, the values are picked out of it directly: find the property name,
+// then the "value" which follows it.
+
+std::wstring GetPowerToysNewPlusFolder() {
+    return ExpandEnvVars(L"%LOCALAPPDATA%\\Microsoft\\PowerToys\\NewPlus");
+}
+
+std::wstring DefaultTemplatesFolder() {
+    return JoinPath(GetPowerToysNewPlusFolder(), L"Templates");
+}
+
+std::wstring ReadFileAsWideString(std::wstring const& path) {
+    HANDLE hFile =
+        CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        return std::wstring();
+    }
+
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(hFile, &size) || size.QuadPart <= 0 ||
+        size.QuadPart > 1024 * 1024) {
+        CloseHandle(hFile);
+        return std::wstring();
+    }
+
+    std::string bytes((size_t)size.QuadPart, '\0');
+    DWORD bytesRead = 0;
+    BOOL succeeded = ReadFile(hFile, bytes.data(), (DWORD)bytes.size(),
+                              &bytesRead, nullptr);
+    CloseHandle(hFile);
+    if (!succeeded) {
+        return std::wstring();
+    }
+
+    bytes.resize(bytesRead);
+
+    // The settings file is UTF-8, with or without a BOM.
+    if (bytes.size() >= 3 && (unsigned char)bytes[0] == 0xEF &&
+        (unsigned char)bytes[1] == 0xBB && (unsigned char)bytes[2] == 0xBF) {
+        bytes.erase(0, 3);
+    }
+
+    int length = MultiByteToWideChar(CP_UTF8, 0, bytes.data(),
+                                     (int)bytes.size(), nullptr, 0);
+    if (length <= 0) {
+        return std::wstring();
+    }
+
+    std::wstring result((size_t)length, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, bytes.data(), (int)bytes.size(),
+                        result.data(), length);
+    return result;
+}
+
+// The raw text of the value which follows the given property name, e.g.
+// `"C:\\Templates"` or `true`. Empty if the property isn't there.
+std::wstring FindJsonValueText(std::wstring const& json, PCWSTR propertyName) {
+    std::wstring needle = L"\"";
+    needle += propertyName;
+    needle += L"\"";
+
+    size_t pos = json.find(needle);
+    if (pos == std::wstring::npos) {
+        return std::wstring();
+    }
+
+    // The properties are wrapped in an object with a single "value" member:
+    // "TemplateLocation": { "value": "..." }. A property whose value is a plain
+    // literal is supported as well.
+    size_t colon = json.find(L':', pos + needle.size());
+    if (colon == std::wstring::npos) {
+        return std::wstring();
+    }
+
+    size_t valuePos = json.find(L"\"value\"", pos + needle.size());
+    size_t nextProperty = json.find(L'}', colon);
+    if (valuePos != std::wstring::npos &&
+        (nextProperty == std::wstring::npos || valuePos < nextProperty)) {
+        colon = json.find(L':', valuePos);
+        if (colon == std::wstring::npos) {
+            return std::wstring();
+        }
+    }
+
+    size_t start = json.find_first_not_of(L" \t\r\n", colon + 1);
+    if (start == std::wstring::npos) {
+        return std::wstring();
+    }
+
+    if (json[start] == L'"') {
+        // Copy the string, unescaping as we go.
+        std::wstring result;
+        for (size_t i = start + 1; i < json.size(); i++) {
+            WCHAR c = json[i];
+            if (c == L'"') {
+                break;
+            }
+
+            if (c == L'\\' && i + 1 < json.size()) {
+                WCHAR escaped = json[++i];
+                switch (escaped) {
+                    case L'n':
+                        result += L'\n';
+                        break;
+                    case L'r':
+                        result += L'\r';
+                        break;
+                    case L't':
+                        result += L'\t';
+                        break;
+                    default:
+                        result += escaped;  // Covers \\ and \".
+                        break;
+                }
+
+                continue;
+            }
+
+            result += c;
+        }
+
+        return result;
+    }
+
+    size_t end = json.find_first_of(L",}\r\n", start);
+    if (end == std::wstring::npos) {
+        end = json.size();
+    }
+
+    std::wstring result = json.substr(start, end - start);
+    while (!result.empty() &&
+           (result.back() == L' ' || result.back() == L'\t')) {
+        result.pop_back();
+    }
+
+    return result;
+}
+
+struct PowerToysConfig {
+    std::wstring templateFolder;
+    bool hideFileExtension = true;
+    bool hideStartingDigits = true;
+    bool replaceVariables = false;
+};
+
+// Read on demand rather than cached, so changing a PowerToys option takes effect
+// the next time the menu is opened.
+PowerToysConfig ReadPowerToysConfig() {
+    PowerToysConfig config;
+
+    std::wstring json = ReadFileAsWideString(
+        JoinPath(GetPowerToysNewPlusFolder(), L"settings.json"));
+    if (json.empty()) {
+        return config;
+    }
+
+    auto readBool = [&json](PCWSTR name, bool fallback) {
+        std::wstring text = ToLower(FindJsonValueText(json, name));
+        if (text == L"true" || text == L"1") {
+            return true;
+        }
+
+        if (text == L"false" || text == L"0") {
+            return false;
+        }
+
+        return fallback;
     };
 
-    auto launchParams = std::make_unique<LaunchParams>(hWnd, item);
+    config.templateFolder =
+        TrimQuotesAndSpaces(FindJsonValueText(json, L"TemplateLocation"));
+    config.hideFileExtension =
+        readBool(L"HideFileExtension", config.hideFileExtension);
+    config.hideStartingDigits =
+        readBool(L"HideStartingDigits", config.hideStartingDigits);
+    config.replaceVariables =
+        readBool(L"ReplaceVariables", config.replaceVariables);
 
-    // Do the shell COM work off the UI thread, so a slow or unresponsive
-    // shell can't block the click handler. Note that IShellBrowser and
-    // friends are owned by the Explorer UI thread, so the calls marshal back
-    // to it; only the waiting happens elsewhere.
-    HANDLE thread = CreateThread(
-        nullptr, 0,
-        [](LPVOID lpParam) -> DWORD {
-            std::unique_ptr<LaunchParams> launchParams(
-                reinterpret_cast<LaunchParams*>(lpParam));
+    return config;
+}
 
-            HRESULT hrInit = CoInitializeEx(
-                nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-            LaunchItemForWindow(launchParams->hExplorerWnd,
-                                launchParams->item);
-            if (SUCCEEDED(hrInit)) {
-                CoUninitialize();
-            }
-            return 0;
-        },
-        launchParams.get(), 0, nullptr);
-    if (thread) {
-        launchParams.release();  // Owned by the thread now.
-        // The handle is closed once the thread finished, either here on a
-        // later launch or in Wh_ModUninit, which waits for it.
-        TrackLaunchThread(thread);
+// How the templates are presented: PowerToys' own New+ configuration, plus the
+// display options of the mod.
+struct EffectiveConfig {
+    std::wstring templateFolder;
+    bool hideFileExtension;
+    bool hideStartingDigits;
+    bool replaceVariables;
+    bool showIcons;
+    bool showTemplatesFolderItem;
+};
+
+EffectiveConfig GetEffectiveConfig() {
+    std::wstring templateFolderSetting;
+
+    EffectiveConfig config{};
+    {
+        std::lock_guard<std::mutex> lock(g_settings.mutex);
+        templateFolderSetting = g_settings.newPlus.templateFolder;
+        config.showIcons = g_settings.newPlus.showIcons;
+        config.showTemplatesFolderItem =
+            g_settings.newPlus.showTemplatesFolderItem;
     }
+
+    PowerToysConfig powerToys = ReadPowerToysConfig();
+
+    config.templateFolder = ExpandEnvVars(
+        !templateFolderSetting.empty()
+            ? templateFolderSetting
+            : (!powerToys.templateFolder.empty() ? powerToys.templateFolder
+                                                 : DefaultTemplatesFolder()));
+    config.hideFileExtension = powerToys.hideFileExtension;
+    config.hideStartingDigits = powerToys.hideStartingDigits;
+    config.replaceVariables = powerToys.replaceVariables;
+
+    return config;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// The New+ templates.
+
+struct TemplateEntry {
+    std::wstring path;      // Full path of the template.
+    std::wstring fileName;  // Name of the template, as it is on disk.
+    std::wstring displayName;
+    bool isDirectory = false;
+};
+
+// Digits at the start of a template's name are only there to order the menu
+// entries; drop them along with the separator which follows.
+std::wstring StripStartingDigits(std::wstring const& name) {
+    size_t pos = 0;
+    while (pos < name.size() && iswdigit(name[pos])) {
+        pos++;
+    }
+
+    if (pos == 0) {
+        return name;
+    }
+
+    while (pos < name.size() && wcschr(L" .-_", name[pos])) {
+        pos++;
+    }
+
+    // Never end up with an empty label, e.g. for a template named "2024".
+    if (pos >= name.size()) {
+        return name;
+    }
+
+    return name.substr(pos);
+}
+
+std::wstring MakeDisplayName(std::wstring const& fileName,
+                             bool isDirectory,
+                             EffectiveConfig const& config) {
+    std::wstring name = fileName;
+
+    if (!isDirectory && config.hideFileExtension) {
+        size_t dot = name.find_last_of(L'.');
+        if (dot != std::wstring::npos && dot > 0) {
+            name.resize(dot);
+        }
+    }
+
+    if (config.hideStartingDigits) {
+        name = StripStartingDigits(name);
+    }
+
+    return name;
+}
+
+std::vector<TemplateEntry> EnumerateTemplates(EffectiveConfig const& config) {
+    std::vector<TemplateEntry> entries;
+
+    std::wstring pattern = JoinPath(config.templateFolder, L"*");
+
+    WIN32_FIND_DATAW findData{};
+    HANDLE hFind =
+        FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &findData,
+                         FindExSearchNameMatch, nullptr,
+                         FIND_FIRST_EX_LARGE_FETCH);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        Wh_Log(L"Couldn't enumerate %s: %u", config.templateFolder.c_str(),
+               GetLastError());
+        return entries;
+    }
+
+    do {
+        std::wstring fileName = findData.cFileName;
+        if (fileName == L"." || fileName == L".." ||
+            _wcsicmp(fileName.c_str(), L"desktop.ini") == 0) {
+            continue;
+        }
+
+        if (findData.dwFileAttributes &
+            (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) {
+            continue;
+        }
+
+        TemplateEntry entry;
+        entry.isDirectory =
+            (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        entry.fileName = fileName;
+        entry.path = JoinPath(config.templateFolder, fileName);
+        entry.displayName =
+            MakeDisplayName(fileName, entry.isDirectory, config);
+        entries.push_back(std::move(entry));
+    } while (FindNextFileW(hFind, &findData));
+
+    FindClose(hFind);
+
+    // Folder templates first, then files, each in the natural, case-insensitive
+    // order File Explorer itself would list them in - the order New+ uses.
+    std::sort(entries.begin(), entries.end(),
+              [](TemplateEntry const& a, TemplateEntry const& b) {
+                  if (a.isDirectory != b.isDirectory) {
+                      return a.isDirectory;
+                  }
+
+                  return StrCmpLogicalW(a.fileName.c_str(),
+                                        b.fileName.c_str()) < 0;
+              });
+
+    return entries;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Creating an item from a New+ template.
+
+std::wstring ReplaceAll(std::wstring str,
+                        std::wstring_view from,
+                        std::wstring const& to) {
+    if (from.empty()) {
+        return str;
+    }
+
+    size_t pos = str.find(from);
+    while (pos != std::wstring::npos) {
+        str.replace(pos, from.size(), to);
+        pos = str.find(from, pos + to.size());
+    }
+
+    return str;
+}
+
+std::wstring TwoDigits(int value) {
+    WCHAR buffer[8];
+    swprintf(buffer, ARRAYSIZE(buffer), L"%02d", value);
+    return buffer;
+}
+
+std::wstring ReplaceNameVariables(std::wstring const& fileName,
+                                  std::wstring const& targetFolder) {
+    SYSTEMTIME time{};
+    GetLocalTime(&time);
+
+    std::wstring parentFolderName;
+    {
+        std::wstring folder = targetFolder;
+        while (!folder.empty() &&
+               (folder.back() == L'\\' || folder.back() == L'/')) {
+            folder.pop_back();
+        }
+
+        size_t slash = folder.find_last_of(L"\\/");
+        parentFolderName =
+            slash == std::wstring::npos ? folder : folder.substr(slash + 1);
+    }
+
+    std::wstring result = fileName;
+    // Longest first, so $YYYY isn't eaten by $YY.
+    result = ReplaceAll(result, L"$PARENT_FOLDER_NAME", parentFolderName);
+    result = ReplaceAll(result, L"$YYYY", std::to_wstring(time.wYear));
+    result = ReplaceAll(result, L"$YY", TwoDigits(time.wYear % 100));
+    result = ReplaceAll(result, L"$MM", TwoDigits(time.wMonth));
+    result = ReplaceAll(result, L"$DD", TwoDigits(time.wDay));
+    result = ReplaceAll(result, L"$hh", TwoDigits(time.wHour));
+    result = ReplaceAll(result, L"$mm", TwoDigits(time.wMinute));
+    result = ReplaceAll(result, L"$ss", TwoDigits(time.wSecond));
+    return result;
+}
+
+// Splits a file name into its base name and extension (including the dot).
+void SplitFileName(std::wstring const& fileName,
+                   bool isDirectory,
+                   std::wstring* baseName,
+                   std::wstring* extension) {
+    size_t dot =
+        isDirectory ? std::wstring::npos : fileName.find_last_of(L'.');
+    if (dot == std::wstring::npos || dot == 0) {
+        *baseName = fileName;
+        extension->clear();
+        return;
+    }
+
+    *baseName = fileName.substr(0, dot);
+    *extension = fileName.substr(dot);
+}
+
+// A path in the target folder which isn't taken yet, in Explorer's style:
+// "Report.docx", "Report (2).docx", ...
+std::wstring MakeUniquePath(std::wstring const& targetFolder,
+                            std::wstring const& fileName,
+                            bool isDirectory) {
+    std::wstring path = JoinPath(targetFolder, fileName);
+    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        return path;
+    }
+
+    std::wstring baseName;
+    std::wstring extension;
+    SplitFileName(fileName, isDirectory, &baseName, &extension);
+
+    for (int i = 2; i < 10000; i++) {
+        std::wstring candidate = baseName;
+        candidate += L" (";
+        candidate += std::to_wstring(i);
+        candidate += L")";
+        candidate += extension;
+
+        path = JoinPath(targetFolder, candidate);
+        if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            return path;
+        }
+    }
+
+    return std::wstring();
+}
+
+bool CopyDirectoryRecursively(std::wstring const& source,
+                              std::wstring const& target) {
+    if (!CreateDirectoryW(target.c_str(), nullptr) &&
+        GetLastError() != ERROR_ALREADY_EXISTS) {
+        Wh_Log(L"CreateDirectory(%s) failed: %u", target.c_str(),
+               GetLastError());
+        return false;
+    }
+
+    std::wstring pattern = JoinPath(source, L"*");
+
+    WIN32_FIND_DATAW findData{};
+    HANDLE hFind =
+        FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &findData,
+                         FindExSearchNameMatch, nullptr,
+                         FIND_FIRST_EX_LARGE_FETCH);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        return true;  // An empty (or unreadable) template folder.
+    }
+
+    bool succeeded = true;
+    do {
+        std::wstring fileName = findData.cFileName;
+        if (fileName == L"." || fileName == L"..") {
+            continue;
+        }
+
+        std::wstring sourceChild = JoinPath(source, fileName);
+        std::wstring targetChild = JoinPath(target, fileName);
+
+        if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            succeeded &= CopyDirectoryRecursively(sourceChild, targetChild);
+        } else if (!CopyFileW(sourceChild.c_str(), targetChild.c_str(),
+                              /*bFailIfExists=*/TRUE)) {
+            Wh_Log(L"CopyFile(%s) failed: %u", targetChild.c_str(),
+                   GetLastError());
+            succeeded = false;
+        }
+    } while (FindNextFileW(hFind, &findData));
+
+    FindClose(hFind);
+    return succeeded;
+}
+
+// Selects the created item and starts editing its name, the way Explorer's own
+// New command does. The view learns about the new item asynchronously, so give
+// it a few chances.
+void SelectAndRename(winrt::com_ptr<IShellView> const& shellView,
+                     std::wstring const& path) {
+    if (!shellView) {
+        return;
+    }
+
+    PIDLIST_ABSOLUTE pidl = nullptr;
+    if (FAILED(SHParseDisplayName(path.c_str(), nullptr, &pidl, 0, nullptr)) ||
+        !pidl) {
+        return;
+    }
+
+    PCUITEMID_CHILD child = ILFindLastID(pidl);
+
+    auto folderView = shellView.try_as<IFolderView>();
+
+    // The view learns about the new item from a change notification, so
+    // selecting it can come too early, in which case nothing happens (and
+    // nothing fails either). Retry until the item is actually selected.
+    for (int attempt = 0; attempt < 20 && !g_unloading; attempt++) {
+        Sleep(50);
+
+        HRESULT hr = shellView->SelectItem(
+            child, SVSI_SELECT | SVSI_DESELECTOTHERS | SVSI_ENSUREVISIBLE |
+                       SVSI_FOCUSED | SVSI_EDIT);
+        if (FAILED(hr)) {
+            continue;
+        }
+
+        if (!folderView) {
+            break;
+        }
+
+        int selectedCount = 0;
+        if (SUCCEEDED(
+                folderView->ItemCount(SVGIO_SELECTION, &selectedCount)) &&
+            selectedCount > 0) {
+            break;
+        }
+    }
+
+    CoTaskMemFree(pidl);
+}
+
+void CreateFromTemplateForWindow(HWND hExplorerWnd,
+                                 TemplateEntry const& entry,
+                                 bool replaceVariables) {
+    ExplorerContext context = GetExplorerContext(hExplorerWnd);
+    if (context.folderPath.empty()) {
+        Wh_Log(L"No filesystem folder for window %08X",
+               (DWORD)(ULONG_PTR)hExplorerWnd);
+        return;
+    }
+
+    std::wstring fileName =
+        replaceVariables
+            ? ReplaceNameVariables(entry.fileName, context.folderPath)
+            : entry.fileName;
+
+    std::wstring targetPath =
+        MakeUniquePath(context.folderPath, fileName, entry.isDirectory);
+    if (targetPath.empty()) {
+        Wh_Log(L"Couldn't find a free name for %s", fileName.c_str());
+        return;
+    }
+
+    Wh_Log(L"Creating %s from %s", targetPath.c_str(), entry.path.c_str());
+
+    bool succeeded;
+    if (entry.isDirectory) {
+        succeeded = CopyDirectoryRecursively(entry.path, targetPath);
+    } else {
+        succeeded = CopyFileW(entry.path.c_str(), targetPath.c_str(),
+                              /*bFailIfExists=*/TRUE) != FALSE;
+        if (!succeeded) {
+            Wh_Log(L"CopyFile failed: %u", GetLastError());
+        }
+    }
+
+    // A folder template can be copied only partially, in which case the folder
+    // itself is there and worth selecting.
+    if (!succeeded &&
+        GetFileAttributesW(targetPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        return;
+    }
+
+    SHChangeNotify(entry.isDirectory ? SHCNE_MKDIR : SHCNE_CREATE, SHCNF_PATHW,
+                   targetPath.c_str(), nullptr);
+
+    SelectAndRename(context.shellView, targetPath);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1334,10 +2102,7 @@ bool LooksLikeIconPath(std::wstring const& iconSetting) {
         return true;
     }
 
-    std::wstring lower = iconSetting;
-    for (auto& c : lower) {
-        c = towlower(c);
-    }
+    std::wstring lower = ToLower(iconSetting);
 
     // Also allow a bare file name, possibly with an icon index.
     size_t comma = lower.rfind(L',');
@@ -1488,6 +2253,13 @@ std::shared_ptr<DecodedIcon> GetIcon(std::wstring const& iconSetting,
         .first->second;
 }
 
+muxc::IconElement CreateGlyphIcon(PCWSTR glyph) {
+    muxc::FontIcon fontIcon;
+    fontIcon.FontFamily(muxm::FontFamily(L"Segoe Fluent Icons"));
+    fontIcon.Glyph(glyph);
+    return fontIcon;
+}
+
 // Returns nullptr if no icon could be resolved from the settings.
 muxc::IconElement TryCreateIconElement(std::wstring const& iconSetting,
                                        std::wstring const& command) {
@@ -1510,10 +2282,7 @@ muxc::IconElement TryCreateIconElement(std::wstring const& iconSetting,
         return nullptr;
     }
 
-    muxc::FontIcon fontIcon;
-    fontIcon.FontFamily(muxm::FontFamily(L"Segoe Fluent Icons"));
-    fontIcon.Glyph(glyph.c_str());
-    return fontIcon;
+    return CreateGlyphIcon(glyph.c_str());
 }
 
 muxc::IconElement CreateIconElement(std::wstring const& iconSetting,
@@ -1523,10 +2292,7 @@ muxc::IconElement CreateIconElement(std::wstring const& iconSetting,
         return icon;
     }
 
-    muxc::FontIcon fontIcon;
-    fontIcon.FontFamily(muxm::FontFamily(L"Segoe Fluent Icons"));
-    fontIcon.Glyph(defaultGlyph);
-    return fontIcon;
+    return CreateGlyphIcon(defaultGlyph);
 }
 
 // Icon for a command bar button, honoring the item's "Hide icon" option.
@@ -1540,19 +2306,63 @@ muxc::IconElement MakeCommandButtonIcon(ActionItem const& item) {
     return CreateIconElement(item.icon, item.command, L"");
 }
 
+// The icon of the New+ button: the icon of Explorer's own New button when the
+// setting is empty, so the command bar keeps its familiar look.
+muxc::IconElement MakeNewPlusButtonIcon(std::wstring const& iconSetting,
+                                        std::wstring const& originalIconUri) {
+    if (iconSetting.empty() && !originalIconUri.empty()) {
+        try {
+            muxm::Imaging::SvgImageSource svgSource(
+                wf::Uri(winrt::hstring{originalIconUri}));
+            muxc::ImageIcon imageIcon;
+            imageIcon.Source(svgSource);
+            return imageIcon;
+        } catch (...) {
+            Wh_Log(L"Error %08X", winrt::to_hresult().value);
+        }
+    }
+
+    // Add, the glyph of Explorer's New button.
+    return CreateIconElement(iconSetting, std::wstring(), L"");
+}
+
+// The shell icon of a file or folder, the same one File Explorer shows for it.
+// Used for the New+ template entries, and deliberately not cached: the menu is
+// rebuilt from the templates folder every time it's opened, so a template whose
+// icon changed shows the new one.
+muxm::ImageSource LoadShellItemIcon(std::wstring const& path) {
+    DecodedIcon decoded;
+    if (!DecodeShellPathIcon(path, &decoded)) {
+        return nullptr;
+    }
+
+    return CreateImageSource(decoded);
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Managing the buttons in the command bar.
 
-bool IsOurElement(muxc::ICommandBarElement const& command) {
-    // Matches both our buttons and our separators.
+bool IsOurNewPlusButton(muxc::ICommandBarElement const& command) {
     auto element = command.try_as<mux::FrameworkElement>();
-    return element &&
-           std::wstring_view(element.Name()).starts_with(kButtonNamePrefix);
+    return element && element.Name() == kNewPlusButtonName;
 }
 
-bool HasOurButtons(muxc::CommandBar const& commandBar) {
+bool IsOurElement(muxc::ICommandBarElement const& command) {
+    // Matches our action buttons and their separators, plus the New+ button.
+    auto element = command.try_as<mux::FrameworkElement>();
+    if (!element) {
+        return false;
+    }
+
+    std::wstring_view name{element.Name()};
+    return name.starts_with(kButtonNamePrefix) || name == kNewPlusButtonName;
+}
+
+// True if the command bar holds any of the elements the given predicate matches.
+bool HasElement(muxc::CommandBar const& commandBar,
+                bool (*predicate)(muxc::ICommandBarElement const&)) {
     for (auto const& command : commandBar.PrimaryCommands()) {
-        if (IsOurElement(command)) {
+        if (predicate(command)) {
             return true;
         }
     }
@@ -1602,12 +2412,8 @@ std::wstring GetButtonIconUri(muxc::AppBarButton const& button) try {
 
 // Returns an index into kDefaultButtons, or -1.
 int IdentifyDefaultButton(muxc::AppBarButton const& button) {
-    std::wstring uri = GetButtonIconUri(button);
+    std::wstring uri = ToLower(GetButtonIconUri(button));
     if (!uri.empty()) {
-        for (auto& c : uri) {
-            c = towlower(c);
-        }
-
         size_t slash = uri.find_last_of(L'/');
         std::wstring_view fileName =
             slash == std::wstring::npos
@@ -1669,6 +2475,12 @@ struct GroupMember {
 struct ManagedTarget {
     ManagedKind kind;
     int index = 0;
+    // The New button only: whether our New+ button is in this command bar right
+    // now. Explorer's New button is hidden for the New+ button's sake, so it
+    // must not be hidden when that button isn't actually there - otherwise a
+    // command bar which our button hasn't reached yet would end up with no New
+    // button at all.
+    bool newPlusPresent = false;
     // GroupSeparator only. Shared so the target stays cheap to copy into the
     // visibility watcher below.
     std::shared_ptr<std::vector<GroupMember>> group;
@@ -1726,6 +2538,14 @@ bool ShouldHide(ManagedTarget const& target) {
     std::lock_guard<std::mutex> lock(g_settings.mutex);
     switch (target.kind) {
         case ManagedKind::Button:
+            // The New+ button takes the place of Explorer's New button, so the
+            // latter is collapsed unless it's explicitly asked for.
+            if (target.index == kNewButtonIndex && target.newPlusPresent &&
+                g_settings.newPlus.enabled &&
+                !g_settings.newPlus.keepOriginalNewButton) {
+                return true;
+            }
+
             return g_settings.hideDefaultButtons[target.index];
         case ManagedKind::SeparatorAfter:
             return g_settings.hideSeparatorAfterButton[target.index];
@@ -2031,6 +2851,9 @@ void ApplyDefaultButtonVisibility(muxc::CommandBar const& commandBar,
     struct Entry {
         muxc::ICommandBarElement command;
         bool isOurs = false;
+        // The New+ button sits among Explorer's own buttons rather than after
+        // them, so it doesn't mark the start of our own elements.
+        bool isNewPlus = false;
         bool isSeparator = false;
         bool isDetailsToggle = false;
         int defaultIndex = -1;  // Index into kDefaultButtons, or -1.
@@ -2043,6 +2866,7 @@ void ApplyDefaultButtonVisibility(muxc::CommandBar const& commandBar,
         Entry entry;
         entry.command = commands.GetAt(i);
         entry.isOurs = IsOurElement(entry.command);
+        entry.isNewPlus = entry.isOurs && IsOurNewPlusButton(entry.command);
         entry.isSeparator =
             !entry.isOurs &&
             static_cast<bool>(entry.command.try_as<muxc::AppBarSeparator>());
@@ -2076,10 +2900,12 @@ void ApplyDefaultButtonVisibility(muxc::CommandBar const& commandBar,
     // line the user sees "after View" is really the separator right before our
     // first custom button, so locate that one.
     uint32_t firstCustomIndex = count;
+    bool hasNewPlusButton = false;
     for (uint32_t i = 0; i < count; i++) {
-        if (entries[i].isOurs) {
+        if (entries[i].isNewPlus) {
+            hasNewPlusButton = true;
+        } else if (entries[i].isOurs && firstCustomIndex == count) {
             firstCustomIndex = i;
-            break;
         }
     }
 
@@ -2110,6 +2936,12 @@ void ApplyDefaultButtonVisibility(muxc::CommandBar const& commandBar,
 
         for (uint32_t i = separatorIndex + 1; i < count; i++) {
             auto const& entry = entries[i];
+            if (entry.isNewPlus) {
+                // Neither a member of the group nor its end: it's one of ours,
+                // but it stands between Explorer's own buttons.
+                continue;
+            }
+
             if (entry.isSeparator || entry.isOurs) {
                 break;
             }
@@ -2157,9 +2989,9 @@ void ApplyDefaultButtonVisibility(muxc::CommandBar const& commandBar,
                 // One of Explorer's contextual separators. Hidden only when
                 // everything it introduces is hidden, so we never reveal a
                 // separator Explorer keeps collapsed.
-                setVisibility(
-                    separator,
-                    {ManagedKind::GroupSeparator, -1, collectGroup(i)});
+                setVisibility(separator,
+                              {ManagedKind::GroupSeparator, -1,
+                               /*newPlusPresent=*/false, collectGroup(i)});
             }
 
             prevIndex = -1;
@@ -2175,7 +3007,8 @@ void ApplyDefaultButtonVisibility(muxc::CommandBar const& commandBar,
 
         if (entry.defaultIndex >= 0) {
             auto button = entry.command.as<muxc::AppBarButton>();
-            setVisibility(button, {ManagedKind::Button, entry.defaultIndex});
+            setVisibility(button, {ManagedKind::Button, entry.defaultIndex,
+                                   hasNewPlusButton});
             // Spacing is applied only to real buttons, never the zero-width
             // contextual commands (which would otherwise occupy space).
             ApplyItemSpacing(button, itemSpacing, forceShow);
@@ -2350,6 +3183,70 @@ void StopHoverTimersForCurrentThread() {
     }
 }
 
+// Makes hovering over the button do what clicking it does, after the configured
+// delay. Used by the buttons of ours which open a menu: the dropdowns and the
+// New+ button.
+void SetUpOpenOnHover(muxc::AppBarButton const& button,
+                      int hoverDelayMs,
+                      std::function<void()> const& open) {
+    if (hoverDelayMs <= 0) {
+        TrackRevoker(
+            button,
+            button.PointerEntered(
+                winrt::auto_revoke,
+                [open](wf::IInspectable const&,
+                       mux::Input::PointerRoutedEventArgs const&) { open(); }));
+        return;
+    }
+
+    mux::DispatcherTimer timer;
+    timer.Interval(std::chrono::milliseconds(hoverDelayMs));
+
+    // The handler gets the timer as its sender, so it doesn't have to capture
+    // it - which would be either a reference cycle or a weak reference on a type
+    // that isn't a DependencyObject.
+    auto tickToken =
+        timer.Tick([open](wf::IInspectable const& sender,
+                          wf::IInspectable const&) {
+            if (auto timer = sender.try_as<mux::DispatcherTimer>()) {
+                timer.Stop();
+            }
+            open();
+        });
+
+    TrackHoverTimer(button, timer, tickToken);
+
+    TrackRevoker(button,
+                 button.PointerEntered(
+                     winrt::auto_revoke,
+                     [timer](wf::IInspectable const&,
+                             mux::Input::PointerRoutedEventArgs const&) {
+                         timer.Stop();  // Restart the delay.
+                         timer.Start();
+                     }));
+
+    auto stopTimer = [timer](wf::IInspectable const&,
+                             mux::Input::PointerRoutedEventArgs const&) {
+        timer.Stop();
+    };
+    TrackRevoker(button, button.PointerExited(winrt::auto_revoke, stopTimer));
+    TrackRevoker(button, button.PointerCanceled(winrt::auto_revoke, stopTimer));
+}
+
+// Shows the button's own flyout, for the buttons which have one.
+std::function<void()> MakeShowFlyoutAction(muxc::AppBarButton const& button) {
+    return [weakButton = winrt::make_weak(button)]() {
+        auto button = weakButton.get();
+        if (!button || g_unloading) {
+            return;
+        }
+
+        if (auto flyout = button.Flyout(); flyout && !flyout.IsOpen()) {
+            flyout.ShowAt(button);
+        }
+    };
+}
+
 muxc::AppBarButton CreateMenuButton(ActionItem const& item,
                                     int index,
                                     bool openOnHover,
@@ -2408,75 +3305,191 @@ muxc::AppBarButton CreateMenuButton(ActionItem const& item,
     button.Flyout(menu);
 
     if (openOnHover) {
-        auto showMenu = [weakButton]() {
-            auto button = weakButton.get();
-            if (!button) {
-                return;
-            }
-
-            if (auto flyout = button.Flyout(); flyout && !flyout.IsOpen()) {
-                flyout.ShowAt(button);
-            }
-        };
-
-        if (hoverDelayMs <= 0) {
-            TrackRevoker(
-                button,
-                button.PointerEntered(
-                    winrt::auto_revoke,
-                    [showMenu](wf::IInspectable const&,
-                               mux::Input::PointerRoutedEventArgs const&) {
-                        showMenu();
-                    }));
-        } else {
-            mux::DispatcherTimer timer;
-            timer.Interval(std::chrono::milliseconds(hoverDelayMs));
-
-            // The handler gets the timer as its sender, so it doesn't have to
-            // capture it - which would be either a reference cycle or a weak
-            // reference on a type that isn't a DependencyObject.
-            auto tickToken = timer.Tick(
-                [showMenu](wf::IInspectable const& sender,
-                           wf::IInspectable const&) {
-                    if (auto timer = sender.try_as<mux::DispatcherTimer>()) {
-                        timer.Stop();
-                    }
-                    showMenu();
-                });
-
-            TrackHoverTimer(button, timer, tickToken);
-
-            TrackRevoker(
-                button,
-                button.PointerEntered(
-                    winrt::auto_revoke,
-                    [timer](wf::IInspectable const&,
-                            mux::Input::PointerRoutedEventArgs const&) {
-                        timer.Stop();  // Restart the delay.
-                        timer.Start();
-                    }));
-
-            auto stopTimer =
-                [timer](wf::IInspectable const&,
-                        mux::Input::PointerRoutedEventArgs const&) {
-                    timer.Stop();
-                };
-            TrackRevoker(button, button.PointerExited(winrt::auto_revoke,
-                                                      stopTimer));
-            TrackRevoker(button, button.PointerCanceled(winrt::auto_revoke,
-                                                        stopTimer));
-        }
+        SetUpOpenOnHover(button, hoverDelayMs, MakeShowFlyoutAction(button));
     }
 
     return button;
 }
 
-void EnsureButtons(muxc::CommandBar const& commandBar) {
+////////////////////////////////////////////////////////////////////////////////
+// The New+ button, which takes the place of Explorer's New button.
+
+// Rebuilds the flyout contents from the templates folder. Done every time the
+// menu opens, so newly added templates show up without reloading the mod.
+void PopulateNewPlusMenu(
+    muxc::MenuFlyout const& menu,
+    winrt::weak_ref<muxc::AppBarButton> const& weakButton) try {
+    auto items = menu.Items();
+    items.Clear();
+
+    EffectiveConfig config = GetEffectiveConfig();
+    std::vector<TemplateEntry> templates = EnumerateTemplates(config);
+
+    if (templates.empty()) {
+        muxc::MenuFlyoutItem placeholder;
+        placeholder.Text(DirectoryExists(config.templateFolder)
+                             ? L"No templates"
+                             : L"Templates folder not found");
+        placeholder.IsEnabled(false);
+        items.Append(placeholder);
+    }
+
+    bool replaceVariables = config.replaceVariables;
+
+    for (auto const& entry : templates) {
+        muxc::MenuFlyoutItem menuItem;
+        menuItem.Text(entry.displayName.c_str());
+
+        if (config.showIcons) {
+            if (auto source = LoadShellItemIcon(entry.path)) {
+                muxc::ImageIcon imageIcon;
+                imageIcon.Source(source);
+                menuItem.Icon(imageIcon);
+            }
+        }
+
+        // The item's tooltip shows the name as it is on disk, which the display
+        // name may hide parts of.
+        if (entry.displayName != entry.fileName) {
+            muxc::ToolTipService::SetToolTip(
+                menuItem, winrt::box_value(winrt::hstring{entry.fileName}));
+        }
+
+        TrackRevoker(
+            menuItem,
+            menuItem.Click(
+                winrt::auto_revoke,
+                [entry, replaceVariables, weakButton](
+                    wf::IInspectable const&, mux::RoutedEventArgs const&) {
+                    if (g_unloading) {
+                        return;
+                    }
+
+                    // The flyout lives in its own popup window, so the Explorer
+                    // window is resolved from the anchor button.
+                    auto button = weakButton.get();
+                    if (!button) {
+                        return;
+                    }
+
+                    HWND hWnd = GetExplorerWindowForElement(button);
+                    RunShellWorkOnWorkerThread(
+                        [hWnd, entry, replaceVariables]() {
+                            CreateFromTemplateForWindow(hWnd, entry,
+                                                        replaceVariables);
+                        });
+                }));
+
+        items.Append(menuItem);
+    }
+
+    if (config.showTemplatesFolderItem) {
+        if (!templates.empty()) {
+            items.Append(muxc::MenuFlyoutSeparator());
+        }
+
+        muxc::MenuFlyoutItem openFolderItem;
+        openFolderItem.Text(L"Open templates folder");
+        openFolderItem.Icon(CreateGlyphIcon(L""));  // OpenFolderHorizontal.
+
+        TrackRevoker(
+            openFolderItem,
+            openFolderItem.Click(
+                winrt::auto_revoke,
+                [folder = config.templateFolder](wf::IInspectable const&,
+                                                 mux::RoutedEventArgs const&) {
+                    if (g_unloading) {
+                        return;
+                    }
+
+                    RunShellWorkOnWorkerThread([folder]() {
+                        if (!DirectoryExists(folder)) {
+                            SHCreateDirectoryExW(nullptr, folder.c_str(),
+                                                 nullptr);
+                        }
+
+                        ShellExecuteW(nullptr, L"open", folder.c_str(), nullptr,
+                                      nullptr, SW_SHOWNORMAL);
+                    });
+                }));
+
+        items.Append(openFolderItem);
+    }
+} catch (...) {
+    Wh_Log(L"Error %08X", winrt::to_hresult().value);
+}
+
+muxc::AppBarButton CreateNewPlusButton(std::wstring const& originalIconUri,
+                                       bool openOnHover,
+                                       int hoverDelayMs) {
+    NewPlusSettings settings;
+    {
+        std::lock_guard<std::mutex> lock(g_settings.mutex);
+        settings = g_settings.newPlus;
+    }
+
+    // The label is what puts the chevron next to the text, the way Explorer's
+    // own New button looks. Without a label there's nothing for a chevron to
+    // follow, so only the icon is shown and the text becomes the tooltip.
+    bool showLabel = settings.showLabel && !settings.buttonLabel.empty();
+
+    muxc::AppBarButton button;
+    button.Name(kNewPlusButtonName);
+    button.Label(settings.buttonLabel.c_str());
+    button.LabelPosition(showLabel
+                             ? muxc::CommandBarLabelPosition::Default
+                             : muxc::CommandBarLabelPosition::Collapsed);
+    button.Icon(
+        MakeNewPlusButtonIcon(settings.buttonIcon, originalIconUri));
+
+    // With the label visible there's nothing a tooltip could add.
+    if (!showLabel && !settings.buttonLabel.empty()) {
+        muxc::ToolTipService::SetToolTip(
+            button, winrt::box_value(winrt::hstring{settings.buttonLabel}));
+    }
+
+    auto weakButton = winrt::make_weak(button);
+
+    muxc::MenuFlyout menu;
+    menu.Placement(
+        muxc::Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
+
+    TrackRevoker(menu,
+                 menu.Opening(winrt::auto_revoke,
+                              [weakButton](wf::IInspectable const& sender,
+                                           wf::IInspectable const&) {
+                                  if (g_unloading) {
+                                      return;
+                                  }
+
+                                  if (auto menu =
+                                          sender.try_as<muxc::MenuFlyout>()) {
+                                      PopulateNewPlusMenu(menu, weakButton);
+                                  }
+                              }));
+
+    button.Flyout(menu);
+
+    if (openOnHover) {
+        SetUpOpenOnHover(button, hoverDelayMs, MakeShowFlyoutAction(button));
+    }
+
+    return button;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Inserting our elements into the command bar.
+
+void EnsureActionButtons(muxc::CommandBar const& commandBar) {
     if (g_unloading) {
         return;
     }
 
-    if (HasOurButtons(commandBar)) {
+    if (HasElement(commandBar, [](muxc::ICommandBarElement const& command) {
+            auto element = command.try_as<mux::FrameworkElement>();
+            return element && std::wstring_view(element.Name())
+                                  .starts_with(kButtonNamePrefix);
+        })) {
         return;
     }
 
@@ -2517,15 +3530,73 @@ void EnsureButtons(muxc::CommandBar const& commandBar) {
     }
 }
 
+// Puts the New+ button where Explorer's New button is. The latter is collapsed
+// by ApplyDefaultButtonVisibility, which asks ShouldHide - and that returns true
+// for the New button while the New+ button is enabled.
+void EnsureNewPlusButton(muxc::CommandBar const& commandBar) {
+    if (g_unloading) {
+        return;
+    }
+
+    bool openMenuOnHover;
+    int menuHoverDelay;
+    bool enabled;
+    {
+        std::lock_guard<std::mutex> lock(g_settings.mutex);
+        enabled = g_settings.newPlus.enabled;
+        openMenuOnHover = g_settings.openMenuOnHover;
+        menuHoverDelay = g_settings.menuHoverDelay;
+    }
+
+    if (!enabled || HasElement(commandBar, IsOurNewPlusButton)) {
+        return;
+    }
+
+    auto commands = commandBar.PrimaryCommands();
+    uint32_t count = commands.Size();
+
+    uint32_t newButtonIndex = count;
+    std::wstring originalIconUri;
+    for (uint32_t i = 0; i < count; i++) {
+        auto command = commands.GetAt(i);
+        if (IsOurElement(command)) {
+            continue;
+        }
+
+        if (auto button = command.try_as<muxc::AppBarButton>();
+            button && IdentifyDefaultButton(button) == kNewButtonIndex) {
+            newButtonIndex = i;
+            originalIconUri = GetButtonIconUri(button);
+            break;
+        }
+    }
+
+    if (newButtonIndex == count) {
+        // Explorer hasn't filled the command bar in yet, or this build has no
+        // New button at all. Appending would put our button somewhere it doesn't
+        // belong, and since it's only ever inserted once it would stay there, so
+        // leave it to the update which follows Explorer's own commands being
+        // added. Explorer's New button stays visible until ours is really there.
+        Wh_Log(L"The New button isn't in the command bar (yet)");
+        return;
+    }
+
+    Wh_Log(L"Adding the New+ button");
+    commands.InsertAt(
+        newButtonIndex,
+        CreateNewPlusButton(originalIconUri, openMenuOnHover, menuHoverDelay));
+}
+
 void UpdateCommandBar(muxc::CommandBar const& commandBar) {
     if (g_unloading) {
         return;
     }
 
-    // Custom buttons only go in the primary command bar; the secondary bar
-    // just holds the Details pane toggle.
+    // Our buttons only go in the primary command bar; the secondary bar just
+    // holds the Details pane toggle.
     if (commandBar.Name() == L"FileExplorerCommandBar") {
-        EnsureButtons(commandBar);
+        EnsureNewPlusButton(commandBar);
+        EnsureActionButtons(commandBar);
     }
 
     ApplyDefaultButtonVisibility(commandBar);
@@ -3279,6 +4350,23 @@ void LoadSettings() {
 
     int itemSpacing = Wh_GetIntSetting(L"itemSpacing");
     g_settings.itemSpacing = itemSpacing < 0 ? -1 : itemSpacing;
+
+    g_settings.newPlus = NewPlusSettings{};
+    g_settings.newPlus.enabled = Wh_GetIntSetting(L"newPlus.enabled") != 0;
+    g_settings.newPlus.showLabel =
+        Wh_GetIntSetting(L"newPlus.showLabel") != 0;
+    g_settings.newPlus.buttonLabel =
+        WindhawkUtils::StringSetting::make(L"newPlus.buttonLabel").get();
+    g_settings.newPlus.buttonIcon =
+        WindhawkUtils::StringSetting::make(L"newPlus.buttonIcon").get();
+    g_settings.newPlus.templateFolder = TrimQuotesAndSpaces(
+        WindhawkUtils::StringSetting::make(L"newPlus.templateFolder").get());
+    g_settings.newPlus.showIcons =
+        Wh_GetIntSetting(L"newPlus.showIcons") != 0;
+    g_settings.newPlus.showTemplatesFolderItem =
+        Wh_GetIntSetting(L"newPlus.showTemplatesFolderItem") != 0;
+    g_settings.newPlus.keepOriginalNewButton =
+        Wh_GetIntSetting(L"newPlus.keepOriginalNewButton") != 0;
 
     g_settings.items.clear();
     for (int i = 0; i < 100; i++) {

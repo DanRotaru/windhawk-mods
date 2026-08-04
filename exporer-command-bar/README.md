@@ -23,10 +23,15 @@ Designed for Windows 11 24H2 / 25H2 with the WinAppSDK (WinUI 3) File Explorer.
   Share, Delete, Sort, View, the group separators, the "See more" (…) overflow
   menu, the contextual commands (Set as background, Rotate left, Rotate right,
   Extract all) and the Details pane toggle.
+- **Replace New with New+** — turn Explorer's New button into a *New+* button
+  which creates files and folders from the templates of the
+  [PowerToys **New+**](https://learn.microsoft.com/en-us/windows/powertoys/newplus)
+  utility, with your own label and icon (see
+  [Replace New to New+](#replace-new-to-new)).
 - **Custom item spacing** — set the exact spacing between the command bar
   buttons, in pixels.
 - **Open menus on hover** — optionally open dropdowns on hover, with a
-  configurable delay.
+  configurable delay. Applies to the New+ button as well.
 - **Rock solid** — buttons are re‑applied automatically across tab switches,
   navigation, new tabs and new windows, and everything is cleanly restored when
   the mod is disabled.
@@ -73,6 +78,63 @@ The **Icon glyph or icon path** field accepts several forms:
   execution aliases such as `wt.exe` are resolved to their real target).
 * **Hide icon** — enable the toggle to show no icon at all.
 
+## Replace New to New+
+
+The **Replace New to New+** group turns Explorer's own **New** button into a
+*New+* button: instead of Explorer's fixed list of file types, the dropdown lists
+the templates of the
+[PowerToys **New+**](https://learn.microsoft.com/en-us/windows/powertoys/newplus)
+utility, and clicking one creates a copy of it in the current folder, selected and
+ready to be renamed.
+
+PowerToys is **not** required: the mod copies the templates itself and never talks
+to the New+ shell extension. It only reads PowerToys' New+ settings file (if there
+is one) to find the templates folder and the *Hide file extension* / *Hide starting
+digits* / *Replace variables* options. Without PowerToys the New+ defaults are
+used: templates are read from
+`%LOCALAPPDATA%\Microsoft\PowerToys\NewPlus\Templates`, extensions and starting
+digits are hidden, and variables are not replaced. Any folder can be used instead
+via the **Templates folder** setting.
+
+Every file and folder directly inside the templates folder becomes a menu entry
+(hidden and system files, and `desktop.ini`, are skipped); a folder template is
+copied with all of its contents. Folder templates are listed first, then files, in
+the order File Explorer itself would list them, and if the name is already taken
+` (2)`, ` (3)`, … is appended. The menu is built when it's opened, so templates
+added or removed in the meantime show up without reloading anything.
+
+The button takes the place of Explorer's New button, which is collapsed — the
+**Keep Explorer's New button** toggle shows both side by side instead. Explorer's
+own button is only ever hidden once the New+ button is really in that command bar,
+so there is no moment in which neither of them is there. The **label** and the
+**icon** are configurable:
+
+* With a label, the familiar chevron (˅) is drawn after the text, exactly like
+  Explorer's own New button.
+* With the label turned off, or with an empty label, only the icon is shown, no
+  chevron is drawn, and the text becomes the button's tooltip.
+* An empty icon setting reuses the icon of Explorer's own New button; otherwise
+  the same forms as in [Icons](#icons) are accepted.
+
+### Filename variables
+
+When *Replace variables* is enabled in PowerToys, these are substituted in the
+name of the created copy:
+
+| Variable | Meaning |
+| --- | --- |
+| `$YYYY` | Year, four digits |
+| `$YY` | Year, two digits |
+| `$MM` | Month, two digits |
+| `$DD` | Day, two digits |
+| `$hh` | Hour, two digits (24h) |
+| `$mm` | Minute, two digits |
+| `$ss` | Second, two digits |
+| `$PARENT_FOLDER_NAME` | Name of the folder the item is created in |
+
+Unlike New+, variables are replaced in the file *name* only, never inside the file
+contents.
+
 ## Default configuration
 
 Out of the box the mod adds:
@@ -87,8 +149,8 @@ Out of the box the mod adds:
     `npm run build`, `npm run start`
   * **AI** ▸ — `Claude`, `Codex`
 
-All of the built‑in buttons stay visible by default. Everything is configurable
-in the mod settings.
+All of the built‑in buttons stay visible by default, and the New+ button is
+turned off. Everything is configurable in the mod settings.
 
 ## How it works
 
@@ -99,6 +161,10 @@ configured buttons are then inserted and the visibility / spacing settings are
 applied. The mod also listens for the command bar being rebuilt so the buttons
 stay in place across navigation, new tabs and new windows, and it restores the
 original state of any element it touches when disabled.
+
+The active tab's folder and selection are resolved through `IShellWindows` /
+`IShellBrowser`, off the UI thread, so a slow or unresponsive shell can't block the
+command bar.
 
 ### Compatibility
 
