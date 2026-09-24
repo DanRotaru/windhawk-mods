@@ -10,6 +10,7 @@ mod: a single `*.wh.cpp` source file plus its own README.
 
 | Mod | Description | Target |
 | --- | --- | --- |
+| [Chrome Context Menu Items](chrome-context-menu-items/) | Hides, adds, groups and reorders Google Chrome's context menu items, restyles Chrome's menus, and tweaks tabs and extension buttons. | `chrome.exe` |
 | [Explorer Command Bar](exporer-command-bar/) | Adds custom action buttons and dropdown menus to the Windows 11 File Explorer command bar, and lets you hide the built-in buttons, separators and spacing. | `explorer.exe`, Windows 11 24H2 / 25H2 |
 
 ## Installing a mod
