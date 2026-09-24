@@ -3976,8 +3976,7 @@ static DWORD WINAPI SetupNotificationThreadProc(void*) {
   if (WaitForSingleObject(g_chromePreparationDoneEvent, 0) != WAIT_OBJECT_0) {
     ShowSetupNotification(
         notifyIcon, L"Chrome Context Menu Items",
-        L"Chrome is being prepared in the background. Chrome started "
-        L"without UI tweaks; you can keep using it.",
+        L"Chrome is being prepared in the background, you can keep using it.",
         NIIF_INFO);
   }
 
