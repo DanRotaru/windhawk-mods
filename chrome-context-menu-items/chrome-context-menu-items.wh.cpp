@@ -3174,7 +3174,7 @@ struct ChromeHook {
   void* replacement;
   bool optional;
   uint64_t schema = kAddressMapHashSeed;
-  WindhawkUtils::SYMBOL_HOOK lookup;
+  WindhawkUtils::SYMBOL_HOOK chromeDllHook;
 
   template <typename Prototype>
   ChromeHook(std::initializer_list<std::wstring_view> names,
@@ -3184,7 +3184,7 @@ struct ChromeHook {
       : original(reinterpret_cast<void**>(originalFunction)),
         replacement(reinterpret_cast<void*>(hookFunction)),
         optional(isOptional),
-        lookup(names, &address, nullptr, isOptional) {
+        chromeDllHook(names, &address, nullptr, isOptional) {
     for (auto name : names) {
       schema = AddressMapHash(schema, name.size());
       for (wchar_t c : name) schema = AddressMapHash(schema, c);
@@ -3354,10 +3354,14 @@ static bool ResolveChromeAddresses(HMODULE module, ChromeHook* hooks, size_t cou
     WH_HOOK_SYMBOLS_OPTIONS options = {};
     options.optionsSize = sizeof(options);
     options.symbolServer = kChromeSymbolServer;
+    // chrome.dll.pdb is several GB and served by Chromium's symbol server, not
+    // Windhawk's online cache; skipping undecoration keeps this one-time pass
+    // fast. Lookups list the decorated public name first and, where needed, the
+    // private function name, which the PDB already stores undecorated.
     options.noUndecoratedSymbols = TRUE;
     std::vector<WindhawkUtils::SYMBOL_HOOK> lookups;
     lookups.reserve(count);
-    for (size_t i = 0; i < count; i++) lookups.push_back(std::move(hooks[i].lookup));
+    for (size_t i = 0; i < count; i++) lookups.push_back(std::move(hooks[i].chromeDllHook));
     if (!WindhawkUtils::HookSymbols(module, lookups.data(), lookups.size(), &options)) return false;
     if (hasIdentity) {
       const std::wstring record = MakeChromeAddressMap(image, hooks, count);
