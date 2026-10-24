@@ -3,7 +3,7 @@
 // @name            Explorer Command Bar
 // @description     Customize the Windows 11 File Explorer command bar with commands, menus, New+, and a shell context-menu button
 // @version         1.3.0
-// @author          DanRotaru (with contributions by ArvindSaini978)
+// @author          DanRotaru
 // @github          https://github.com/DanRotaru
 // @homepage        https://dan13.me/
 // @include         explorer.exe
@@ -193,16 +193,16 @@ name of the created copy:
 Unlike New+, variables are replaced in the file *name* only, never inside the
 file contents.
 
---
+---
 
 ## Default configuration
 
 Out of the box the mod adds:
 
 * **Open in Terminal** - `wt.exe -d "%path%"`
-* **Open in Notepad** - `notepad.exe "%sel_each%"`
+* **Open in Notepad** - `notepad.exe "%sel%"`
 * **Additional** ▾ (dropdown)
-  * Open in VS Code - `code.exe "%sel%"`
+  * Open in VS Code - `code.exe "%path%"`
   * Open Paint - `mspaint.exe`
   * Open Calculator - `calc.exe`
   * **Commands** ▸ - `vite`, `npm init`, `npm install`, `npm run dev`,
@@ -239,6 +239,8 @@ and TranslucentTB.
 File Explorer windows which are already open when the mod is enabled are
 handled too, but if the buttons don't show up in one of them right away, opening
 a new tab or navigating to another folder makes them appear.
+
+Thanks to [ArvindSaini978](https://github.com/ArvindSaini978) for contributing.
 */
 // ==/WindhawkModReadme==
 
@@ -250,22 +252,36 @@ a new tab or navigating to another folder makes them appear.
       $options:
       - button: Single button
       - menu: Dropdown menu
-    - name: Folder Options
+    - name: Open in Terminal
       $name: Name
       $description: Shown as the button tooltip.
-    - command: internal:FolderOptions
+    - command: wt.exe
       $name: Command
       $description: >-
-        The executable to run, or an internal command using 'internal:' or 'int:' prefix (case-insensitive: TogglePreview, ToggleDetails, FolderOptions, OpenWith).
-    - parameters: ""
+        The executable to run. For dropdown menus it's only used as an icon
+        source. Alternatively, an internal command with the internal: or int:
+        prefix (case-insensitive): internal:TogglePreview,
+        internal:ToggleDetails, internal:FolderOptions or internal:OpenWith.
+    - parameters: -d "%path%"
       $name: Parameters
       $description: >-
-        Command line parameters. %path% is replaced with current directory; %sel% is expanded to all highlighted file/folder paths; %sel_each% executes a process instance per item.
-    - iconGlyph: E713
+        Command line parameters. %path% is replaced with the current folder
+        path, %sel% with the paths of all selected files/folders (each quoted
+        and separated by a space), and %sel_each% runs the command once per
+        selected item. If a used placeholder has no value (e.g. no selection,
+        or a location like This PC), the command is launched without
+        parameters.
+    - iconGlyph: ""
       $name: Icon glyph or icon path
       $description: >-
-        Fluent icon glyph (e.g. E713), file path (.ico/.dll/.exe), or empty for executable icon. 
-        Separate with | for theme-aware icons (Light | Dark, or | Dark).
+        Hex code point of a Segoe Fluent Icons glyph, e.g. E756
+        (CommandPrompt) or EC7A. The list of glyphs:
+        https://learn.microsoft.com/en-us/windows/apps/design/iconography/segoe-fluent-icons-font
+        Alternatively, a path to an .exe, .dll or
+        .ico file to use its icon, optionally with an icon index, e.g.
+        C:\Windows\System32\shell32.dll,3. Leave empty to use the icon of the
+        command's executable. Separate two values with | for theme-aware
+        icons (Light | Dark, or | Dark).
     - hideIcon: false
       $name: Hide icon
       $description: Don't show an icon for this item.
@@ -275,7 +291,7 @@ a new tab or navigating to another folder makes them appear.
     - labelText: ""
       $name: Custom Label Text
       $description: Text displayed next to the icon. If empty, the Name field is used.
-    - separatorAfter: true
+    - separatorAfter: false
       $name: Vertical separator after
       $description: Show a vertical separator line after this button.
     - subItems:
@@ -286,65 +302,79 @@ a new tab or navigating to another folder makes them appear.
           - menu: Submenu
         - name: ""
           $name: Name
+          $description: The menu item text.
         - command: ""
           $name: Command
+          $description: >-
+            The executable to run. For submenus it's only used as an icon
+            source.
         - parameters: ""
           $name: Parameters
+          $description: >-
+            Command line parameters. %path% is replaced with the current
+            folder path, %sel% with the paths of all selected files/folders,
+            %sel_each% runs the command once per selected item.
         - iconGlyph: ""
           $name: Icon glyph or icon path
+          $description: >-
+            Hex code point of a Segoe Fluent Icons glyph
+            (https://learn.microsoft.com/en-us/windows/apps/design/iconography/segoe-fluent-icons-font),
+            or a path to an .exe, .dll or .ico file, optionally with an icon
+            index. Leave empty to use the icon of the command's executable.
         - hideIcon: false
           $name: Hide icon
+          $description: Don't show an icon for this menu item.
         - separatorAfter: false
-          $name: Vertical separator after
+          $name: Separator after
+          $description: Show a separator line below this menu item.
         - subItems:
           - - name: ""
               $name: Name
+              $description: The menu item text.
             - command: ""
               $name: Command
             - parameters: ""
               $name: Parameters
+              $description: >-
+                Command line parameters. %path% is replaced with the current
+                folder path, %sel% with the paths of all selected
+                files/folders, %sel_each% runs the command once per selected
+                item.
             - iconGlyph: ""
               $name: Icon glyph or icon path
+              $description: >-
+                Hex code point of a Segoe Fluent Icons glyph
+                (https://learn.microsoft.com/en-us/windows/apps/design/iconography/segoe-fluent-icons-font),
+                or a path to an .exe, .dll or .ico file, optionally with an
+                icon index. Leave empty to use the icon of the command's
+                executable.
             - hideIcon: false
               $name: Hide icon
+              $description: Don't show an icon for this menu item.
             - separatorAfter: false
-              $name: Vertical separator after
-          $name: Nested items
-          $description: Items inside this nested submenu.
+              $name: Separator after
+              $description: Show a separator line below this menu item.
+          $name: Submenu items
+          $description: The entries of the submenu, for the submenu type.
       $name: Menu items
-      $description: Items shown in the dropdown menu.
-  - - type: button
-    - name: Open in Terminal
-    - command: wt.exe
-    - parameters: -d "%path%"
-    - iconGlyph: ""
-    - hideIcon: false
-    - showLabel: false
-    - labelText: ""
-    - separatorAfter: false
+      $description: The entries of the dropdown menu, for the dropdown type.
   - - type: button
     - name: Open in Notepad
     - command: notepad.exe
-    - parameters: '%sel_each%'
+    - parameters: '"%sel%"'
     - iconGlyph: 'shell:AppsFolder\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App'
-    - hideIcon: false
-    - showLabel: false
-    - labelText: ""
     - separatorAfter: false
   - - type: menu
     - name: Additional
     - command: ""
     - parameters: ""
     - iconGlyph: E81E
-    - hideIcon: false
-    - showLabel: false
-    - labelText: ""
     - separatorAfter: false
     - subItems:
       - - type: button
         - name: Open in VS Code
         - command: code.exe
-        - parameters: '%sel%'
+        - parameters: '"%path%"'
         - iconGlyph: ""
         - separatorAfter: false
         - subItems:
@@ -429,7 +459,9 @@ a new tab or navigating to another folder makes them appear.
             - hideIcon: true
             - separatorAfter: false
   $name: Toolbar items
-  $description: Custom buttons and dropdown menus added to the command bar.
+  $description: >-
+    Each toolbar item is either a single button or a dropdown menu. Use the
+    plus button to add another one.
 - placeOnSecondaryBar: false
   $name: Place buttons on the right side
   $description: >-
@@ -464,51 +496,128 @@ a new tab or navigating to another folder makes them appear.
     $name: See more (the three dots menu)
   - setAsBackground: false
     $name: Set as background
+    $description: Shown when an image file is selected.
   - rotateLeft: false
     $name: Rotate left
+    $description: Shown when an image file is selected.
   - rotateRight: false
     $name: Rotate right
+    $description: Shown when an image file is selected.
   - extractAll: false
     $name: Extract all
+    $description: Shown when a zip or other archive file is selected.
   - details: false
     $name: Details pane toggle
   $name: Hide default toolbar buttons
+  $description: >-
+    Hide the built-in buttons of the File Explorer command bar. The vertical
+    separator of the contextual commands (Set as background, Rotate left,
+    Rotate right, Extract all) is hidden along with them, once none of them is
+    left to show.
 - newPlus:
   - enabled: false
     $name: Replace New with New+
+    $description: >-
+      Put a New+ button in the place of Explorer's New button. Its dropdown
+      lists the templates of the PowerToys New+ utility instead of Explorer's
+      fixed list of file types, and clicking one creates a copy of it in the
+      current folder. PowerToys isn't required - the mod copies the templates
+      itself and only reads PowerToys' New+ settings, if there are any.
   - showLabel: true
     $name: Show the button label
+    $description: >-
+      Show the label next to the icon, the way Explorer's own New button does,
+      with a chevron after the text. When disabled, only the icon is shown, no
+      chevron is drawn, and the label becomes the button's tooltip.
   - buttonLabel: New
     $name: Button label
+    $description: >-
+      The text of the button, also used as its tooltip when the label is
+      hidden. Leave empty for an icon-only button without a chevron.
   - buttonIcon: ""
     $name: Button icon glyph or icon path
+    $description: >-
+      Leave empty to reuse the icon of Explorer's own New button.
+      Alternatively, a hex code point of a Segoe Fluent Icons glyph, e.g. E710
+      (https://learn.microsoft.com/en-us/windows/apps/design/iconography/segoe-fluent-icons-font),
+      or a path to an .exe, .dll or .ico file, optionally with an icon index,
+      e.g. C:\Windows\System32\shell32.dll,3.
   - templateFolder: ""
     $name: Templates folder
+    $description: >-
+      The folder to read the templates from. Leave empty to use the folder
+      configured in PowerToys, or the New+ default location
+      (%LOCALAPPDATA%\Microsoft\PowerToys\NewPlus\Templates) if PowerToys isn't
+      installed.
   - showIcons: true
     $name: Show template icons
+    $description: >-
+      Show the shell icon of each template in the menu. Disable it if opening
+      the menu feels slow with many templates.
   - showTemplatesFolderItem: true
     $name: Add an "Open templates folder" entry
+    $description: >-
+      Append an entry which opens the templates folder, creating it if it
+      doesn't exist yet.
   - keepOriginalNewButton: false
     $name: Keep Explorer's New button
+    $description: >-
+      Show the built-in New button next to the New+ button instead of hiding
+      it.
   $name: Replace New to New+
+  $description: >-
+    Replace Explorer's New button with a New+ button which creates files and
+    folders from your own templates, the way the PowerToys New+ utility does.
+    The label and the icon of the button are up to you.
 - contextMenuItem:
   - enabled: false
     $name: Add the context menu item
+    $description: >-
+      Add another command bar item which opens the shell context menu of the
+      current selection or folder, like right-clicking in File Explorer.
   - useNilesoftShell: false
     $name: Let File Explorer show the menu (for Nilesoft Shell)
+    $description: >-
+      Ask the file list to show its own context menu instead of building the
+      classic shell menu. Enable this for Nilesoft Shell, which replaces the
+      menu from inside Explorer. The menu is positioned by Explorer and the
+      active selection or folder background automatically.
   - showLabel: false
     $name: Show the item label
+    $description: >-
+      Show the label next to the icon. When disabled, only the icon is shown
+      and the label becomes the tooltip.
   - buttonLabel: Context menu
     $name: Item label
+    $description: The label and tooltip of the context menu item.
   - buttonIcon: E8FD
     $name: Item icon glyph or icon path
+    $description: >-
+      A Segoe Fluent Icons hex code point, or an .exe, .dll or .ico path with
+      an optional icon index. Leave empty for the default glyph.
   $name: Context menu item
+  $description: >-
+    Add a configurable item which expands the real File Explorer shell context
+    menu for the active tab.
 - openMenuOnHover: false
   $name: Open menus on hover
+  $description: >-
+    Open dropdown menus by hovering over the button instead of clicking it.
+    Applies to the New+ button as well.
 - menuHoverDelay: 400
   $name: Hover delay (milliseconds)
+  $description: >-
+    How long the cursor has to stay over the button before the menu opens.
+    Only used when "Open menus on hover" is enabled.
 - itemSpacing: -1
   $name: Item spacing (pixels at 100% scaling)
+  $description: >-
+    Horizontal spacing between the command bar buttons. -1 leaves the default
+    spacing unchanged; 0 places the buttons right next to each other; 5 means 5
+    pixels between buttons, and so on. The value is in effective pixels, so at
+    150% display scaling it results in 1.5 times as many physical pixels. Note
+    that any value other than -1 also removes the built-in buttons' minimum
+    width, which shrinks their click area down to the icon.
 */
 // ==/WindhawkModSettings==
 
