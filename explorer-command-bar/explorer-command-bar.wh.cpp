@@ -2,13 +2,14 @@
 // @id              explorer-command-bar
 // @name            Explorer Command Bar
 // @description     Customize the Windows 11 File Explorer command bar with commands, menus, New+, and a shell context-menu button
-// @version         1.3.0
+// @version         1.2.0
 // @author          DanRotaru
 // @github          https://github.com/DanRotaru
+// @donateUrl       https://buymeacoffee.com/widget/page/danrotaru
 // @homepage        https://dan13.me/
 // @include         explorer.exe
 // @architecture    x86-64
-// @compilerOptions -ladvapi32 -lgdi32 -lole32 -loleaut32 -lruntimeobject -lshell32 -lshlwapi -luuid
+// @compilerOptions -ladvapi32 -lcomctl32 -ldwmapi -lgdi32 -lole32 -loleaut32 -lruntimeobject -lshell32 -lshlwapi -luuid
 // @license         MIT
 // ==/WindhawkMod==
 
@@ -63,6 +64,31 @@ Explorer.
 - **Rock solid** - buttons are re-applied automatically across tab switches,
   navigation, new tabs and new windows, and everything is cleanly restored when
   the mod is disabled.
+- **Settings window** - a cog button in the command bar opens a Windows 11
+  style settings window, where toolbar items and menus are edited in a tree
+  instead of nested lists.
+
+---
+
+## Settings window
+
+With **Show Explorer Command Bar Settings Item** enabled (the default), a cog
+button is added to the command bar. It opens a settings window which follows
+the WinUI 3 design of Windows 11. The toolbar items page shows a live preview
+of the File Explorer command bar with your settings: click one of your items
+(or an entry of one of its menus) to edit it below, with pickers for programs
+and icons, the internal commands and the placeholders. The other settings are
+grouped into pages with toggles and number boxes.
+
+The window edits the same settings as Windhawk, so both always show the same
+configuration. Windhawk stores mod settings in a protected registry key, so
+**Save** shows an administrator (UAC) prompt, and File Explorer applies the new
+settings right after. The portable version of Windhawk isn't supported by the
+window.
+
+**Explorer Command Bar Settings Item Order** sets the position of the cog
+button among your toolbar items: `0` places it before the first item, `1`
+after the first one, and so on. `-1` places it after the last one.
 
 ---
 
@@ -246,6 +272,18 @@ Thanks to [ArvindSaini978](https://github.com/ArvindSaini978) for contributing.
 
 // ==WindhawkModSettings==
 /*
+- showSettingsItem: true
+  $name: Show Explorer Command Bar Settings Item
+  $description: >-
+    Add a cog button to the command bar which opens the Explorer Command Bar
+    settings window, an easier way to edit these settings - especially the
+    toolbar items and menus.
+- settingsItemOrder: -1
+  $name: Explorer Command Bar Settings Item Order
+  $description: >-
+    The position of the settings item among the toolbar items. 0 places it
+    before the first item, 1 after the first item, and so on. -1 places it
+    after the last item.
 - items:
   - - type: button
       $name: Main Item Type
@@ -626,6 +664,8 @@ Thanks to [ArvindSaini978](https://github.com/ArvindSaini978) for contributing.
 #include <windhawk_utils.h>
 #include <windows.h>
 
+#include <commctrl.h>
+#include <dwmapi.h>
 #include <exdisp.h>
 #include <servprov.h>
 #include <shellapi.h>
@@ -636,10 +676,12 @@ Thanks to [ArvindSaini978](https://github.com/ArvindSaini978) for contributing.
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <cwchar>
 #include <cwctype>
 #include <functional>
@@ -735,6 +777,8 @@ struct {
     bool hideMoreButton = false;
     bool hideDetailsButton = false;
     int itemSpacing = -1;
+    bool showSettingsItem = true;
+    int settingsItemOrder = -1;
     std::vector<ActionItem> items;
     NewPlusSettings newPlus;
     ContextMenuItemSettings contextMenuItem;
@@ -751,7 +795,9 @@ struct {
 #include <winrt/Microsoft.UI.Xaml.Controls.Primitives.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
 #include <winrt/Microsoft.UI.Xaml.Documents.h>
+#include <winrt/Microsoft.UI.Xaml.Hosting.h>
 #include <winrt/Microsoft.UI.Xaml.Input.h>
+#include <winrt/Microsoft.UI.Xaml.Markup.h>
 #include <winrt/Microsoft.UI.Xaml.Media.Imaging.h>
 #include <winrt/Microsoft.UI.Xaml.Media.h>
 #include <winrt/Microsoft.UI.Xaml.h>
@@ -759,15 +805,22 @@ struct {
 #include <winrt/Windows.Data.Json.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Graphics.h>
 #include <winrt/Windows.Storage.Streams.h>
+#include <winrt/Windows.System.h>
+#include <winrt/Windows.UI.Text.h>
+#include <winrt/Windows.UI.ViewManagement.h>
+#include <winrt/Windows.UI.h>
 #include <winrt/base.h>
 
 namespace wdj = winrt::Windows::Data::Json;
 namespace wf = winrt::Windows::Foundation;
 namespace wfc = winrt::Windows::Foundation::Collections;
+namespace mud = winrt::Microsoft::UI::Dispatching;
 namespace mux = winrt::Microsoft::UI::Xaml;
 namespace muxc = winrt::Microsoft::UI::Xaml::Controls;
 namespace muxd = winrt::Microsoft::UI::Xaml::Documents;
+namespace muxh = winrt::Microsoft::UI::Xaml::Hosting;
 namespace muxm = winrt::Microsoft::UI::Xaml::Media;
 #pragma endregion
 
@@ -776,6 +829,7 @@ namespace muxm = winrt::Microsoft::UI::Xaml::Media;
 constexpr PCWSTR kButtonNamePrefix = L"WindhawkActionButton";
 constexpr PCWSTR kNewPlusButtonName = L"WindhawkNewPlusButton";
 constexpr PCWSTR kContextMenuButtonName = L"WindhawkContextMenuButton";
+constexpr PCWSTR kSettingsButtonName = L"WindhawkSettingsButton";
 
 struct CommandBarEntry {
     winrt::weak_ref<muxc::CommandBar> commandBar;
@@ -2586,7 +2640,7 @@ bool IsOurElement(muxc::ICommandBarElement const& command) {
         return false;
     std::wstring_view name{element.Name()};
     return name.starts_with(kButtonNamePrefix) || name == kNewPlusButtonName ||
-           name == kContextMenuButtonName;
+           name == kContextMenuButtonName || name == kSettingsButtonName;
 }
 
 bool HasElement(muxc::CommandBar const& commandBar,
@@ -2661,6 +2715,28 @@ int IdentifyDefaultButton(muxc::AppBarButton const& button) {
     }
 
     return -1;
+}
+
+struct DefaultButtonLook {
+    std::wstring iconUri;
+    std::wstring label;
+};
+
+// Remembered for the command bar preview of the settings window, which shows
+// the built-in buttons with File Explorer's own icons and labels.
+std::mutex g_defaultButtonLooksMutex;
+DefaultButtonLook g_defaultButtonLooks[kDefaultButtonCount];
+DefaultButtonLook g_detailsButtonLook;
+
+void RememberDefaultButtonLook(DefaultButtonLook* look,
+                               muxc::AppBarButton const& button) {
+    std::wstring iconUri = GetButtonIconUri(button);
+    std::wstring label{button.Label()};
+    std::lock_guard<std::mutex> lock(g_defaultButtonLooksMutex);
+    if (!iconUri.empty())
+        look->iconUri = std::move(iconUri);
+    if (!label.empty())
+        look->label = std::move(label);
 }
 
 std::wstring GetAutomationId(mux::FrameworkElement const& element) {
@@ -2985,9 +3061,13 @@ void ApplyDefaultButtonVisibility(muxc::CommandBar const& commandBar,
             if (auto button = entry.command.try_as<muxc::AppBarButton>()) {
                 if (GetAutomationId(button) == L"DetailsPaneToggleButton") {
                     entry.isDetailsToggle = true;
+                    RememberDefaultButtonLook(&g_detailsButtonLook, button);
                 } else {
                     entry.defaultIndex = IdentifyDefaultButton(button);
-                    if (entry.defaultIndex < 0) {
+                    if (entry.defaultIndex >= 0) {
+                        RememberDefaultButtonLook(
+                            &g_defaultButtonLooks[entry.defaultIndex], button);
+                    } else {
                         Wh_Log(
                             L"Unrecognized command %u: icon %s, automation id "
                             L"%s",
@@ -3654,6 +3734,83 @@ void EnsureContextMenuButton(muxc::CommandBar const& commandBar) {
         CreateContextMenuButton(openMenuOnHover, menuHoverDelay));
 }
 
+void OpenSettingsWindow(HWND hHintWnd);
+
+muxc::AppBarButton CreateSettingsButton() {
+    muxc::AppBarButton button;
+    button.Name(kSettingsButtonName);
+    button.Label(L"Command bar settings");
+    button.LabelPosition(muxc::CommandBarLabelPosition::Collapsed);
+    button.Icon(CreateGlyphIcon(L""));
+    muxc::ToolTipService::SetToolTip(
+        button, winrt::box_value(winrt::hstring{L"Explorer Command Bar settings"}));
+
+    TrackRevoker(
+        button,
+        button.Click(winrt::auto_revoke, [](wf::IInspectable const& sender,
+                                            mux::RoutedEventArgs const&) {
+            if (g_unloading)
+                return;
+            HWND hWnd = nullptr;
+            if (auto element = sender.try_as<mux::FrameworkElement>())
+                hWnd = GetExplorerWindowForElement(element);
+            OpenSettingsWindow(hWnd);
+        }));
+
+    return button;
+}
+
+void EnsureSettingsButton(muxc::CommandBar const& commandBar) {
+    if (g_unloading)
+        return;
+    bool enabled;
+    int order;
+    {
+        std::lock_guard<std::mutex> lock(g_settings.mutex);
+        enabled = g_settings.showSettingsItem;
+        order = g_settings.settingsItemOrder;
+    }
+
+    if (!enabled ||
+        HasElement(commandBar, [](muxc::ICommandBarElement const& command) {
+            auto element = command.try_as<mux::FrameworkElement>();
+            return element && element.Name() == kSettingsButtonName;
+        }))
+        return;
+
+    // The position is counted among the custom toolbar items, separators
+    // excluded. Past the last item, the button goes after the last custom
+    // element (or its separator).
+    auto commands = commandBar.PrimaryCommands();
+    uint32_t count = commands.Size();
+    bool isSecondary = commandBar.Name() == L"FileExplorerSecondaryCommandBar";
+    uint32_t afterLast = isSecondary ? 0 : count;
+    bool hasCustomElement = false;
+    std::vector<uint32_t> itemIndexes;
+    for (uint32_t i = 0; i < count; i++) {
+        auto element = commands.GetAt(i).try_as<mux::FrameworkElement>();
+        if (!element)
+            continue;
+        winrt::hstring name = element.Name();
+        std::wstring_view view{name};
+        if (!isSecondary && !hasCustomElement && view == kContextMenuButtonName)
+            afterLast = i;
+        if (!view.starts_with(kButtonNamePrefix))
+            continue;
+        hasCustomElement = true;
+        afterLast = i + 1;
+        if (view.find(L"_Sep_") == std::wstring_view::npos)
+            itemIndexes.push_back(i);
+    }
+
+    uint32_t insertIndex = order >= 0 && (size_t)order < itemIndexes.size()
+                               ? itemIndexes[order]
+                               : afterLast;
+
+    Wh_Log(L"Adding the settings item at %u", insertIndex);
+    commands.InsertAt(insertIndex, CreateSettingsButton());
+}
+
 void EnsureNewPlusButton(muxc::CommandBar const& commandBar) {
     if (g_unloading)
         return;
@@ -3711,6 +3868,7 @@ void UpdateCommandBar(muxc::CommandBar const& commandBar) {
         EnsureNewPlusButton(commandBar);
         if (!placeOnSecondary) {
             EnsureActionButtons(commandBar);
+            EnsureSettingsButton(commandBar);
         }
         EnsureContextMenuButton(commandBar);
     } else if (commandBar.Name() == L"FileExplorerSecondaryCommandBar") {
@@ -3718,6 +3876,7 @@ void UpdateCommandBar(muxc::CommandBar const& commandBar) {
             commandBar.DefaultLabelPosition(
                 muxc::CommandBarDefaultLabelPosition::Right);
             EnsureActionButtons(commandBar);
+            EnsureSettingsButton(commandBar);
         }
     }
 
@@ -4299,6 +4458,10 @@ void LoadSettings() {
     int itemSpacing = Wh_GetIntSetting(L"itemSpacing");
     g_settings.itemSpacing = itemSpacing < 0 ? -1 : itemSpacing;
 
+    g_settings.showSettingsItem = Wh_GetIntSetting(L"showSettingsItem") != 0;
+    int settingsItemOrder = Wh_GetIntSetting(L"settingsItemOrder");
+    g_settings.settingsItemOrder = settingsItemOrder < 0 ? -1 : settingsItemOrder;
+
     g_settings.newPlus = NewPlusSettings{};
     g_settings.newPlus.enabled = Wh_GetIntSetting(L"newPlus.enabled") != 0;
     g_settings.newPlus.showLabel = Wh_GetIntSetting(L"newPlus.showLabel") != 0;
@@ -4340,6 +4503,3326 @@ void LoadSettings() {
     }
 }
 
+struct EditableSettings {
+    std::vector<ActionItem> items;
+    bool placeOnSecondaryBar = false;
+    bool openMenuOnHover = false;
+    int menuHoverDelay = 400;
+    int itemSpacing = -1;
+    bool showSettingsItem = true;
+    int settingsItemOrder = -1;
+    bool hideDefaultButtons[kDefaultButtonCount] = {};
+    bool hideSeparatorAfterNew = false;
+    bool hideSeparatorAfterDelete = false;
+    bool hideSeparatorAfterView = false;
+    bool hideMoreButton = false;
+    bool hideDetailsButton = false;
+    NewPlusSettings newPlus;
+    ContextMenuItemSettings contextMenuItem;
+};
+
+EditableSettings SnapshotSettings() {
+    std::lock_guard<std::mutex> lock(g_settings.mutex);
+    EditableSettings settings;
+    settings.items = g_settings.items;
+    settings.placeOnSecondaryBar = g_settings.placeOnSecondaryBar;
+    settings.openMenuOnHover = g_settings.openMenuOnHover;
+    settings.menuHoverDelay = g_settings.menuHoverDelay;
+    settings.itemSpacing = g_settings.itemSpacing;
+    settings.showSettingsItem = g_settings.showSettingsItem;
+    settings.settingsItemOrder = g_settings.settingsItemOrder;
+    for (int i = 0; i < kDefaultButtonCount; i++)
+        settings.hideDefaultButtons[i] = g_settings.hideDefaultButtons[i];
+    settings.hideSeparatorAfterNew =
+        g_settings.hideSeparatorAfterButton[kNewButtonIndex];
+    settings.hideSeparatorAfterDelete =
+        g_settings.hideSeparatorAfterButton[kDeleteButtonIndex];
+    settings.hideSeparatorAfterView =
+        g_settings.hideSeparatorAfterButton[kViewButtonIndex];
+    settings.hideMoreButton = g_settings.hideMoreButton;
+    settings.hideDetailsButton = g_settings.hideDetailsButton;
+    settings.newPlus = g_settings.newPlus;
+    settings.contextMenuItem = g_settings.contextMenuItem;
+    return settings;
+}
+
+enum class SettingKind {
+    Header,
+    Bool,
+    Int,
+    String,
+};
+
+struct SettingField {
+    SettingKind kind = SettingKind::Header;
+    std::wstring key;
+    std::wstring title;
+    std::wstring description;
+    PCWSTR glyph = nullptr;
+    void* value = nullptr;
+    int minimum = 0;
+    bool inverted = false;
+    bool wide = false;
+};
+
+struct SettingsPageDef {
+    std::wstring tag;
+    std::wstring title;
+    std::wstring description;
+    PCWSTR glyph = nullptr;
+    std::vector<SettingField> fields;
+};
+
+SettingField HeaderField(PCWSTR title) {
+    SettingField field;
+    field.title = title;
+    return field;
+}
+
+SettingField BoolField(std::wstring key,
+                       PCWSTR title,
+                       PCWSTR description,
+                       bool* value,
+                       PCWSTR glyph = nullptr,
+                       bool inverted = false) {
+    SettingField field;
+    field.kind = SettingKind::Bool;
+    field.key = std::move(key);
+    field.title = title;
+    field.description = description;
+    field.value = value;
+    field.glyph = glyph;
+    field.inverted = inverted;
+    return field;
+}
+
+SettingField IntField(PCWSTR key,
+                      PCWSTR title,
+                      PCWSTR description,
+                      int* value,
+                      int minimum,
+                      PCWSTR glyph = nullptr) {
+    SettingField field;
+    field.kind = SettingKind::Int;
+    field.key = key;
+    field.title = title;
+    field.description = description;
+    field.value = value;
+    field.minimum = minimum;
+    field.glyph = glyph;
+    return field;
+}
+
+SettingField StringField(PCWSTR key,
+                         PCWSTR title,
+                         PCWSTR description,
+                         std::wstring* value,
+                         bool wide,
+                         PCWSTR glyph = nullptr) {
+    SettingField field;
+    field.kind = SettingKind::String;
+    field.key = key;
+    field.title = title;
+    field.description = description;
+    field.value = value;
+    field.wide = wide;
+    field.glyph = glyph;
+    return field;
+}
+
+constexpr PCWSTR kDefaultButtonTitles[kDefaultButtonCount] = {
+    L"New",    L"Cut",  L"Copy",
+    L"Paste",  L"Rename",
+    L"Share",  L"Delete",
+    L"Sort",   L"View",
+    L"Set as background",
+    L"Rotate left",
+    L"Rotate right",
+    L"Extract all",
+};
+
+constexpr PCWSTR kDefaultButtonGlyphs[kDefaultButtonCount] = {
+    L"\uE710", L"\uE8C6", L"\uE8C8", L"\uE77F", L"\uE8AC",
+    L"\uE72D", L"\uE74D", L"\uE8CB", L"\uE890", L"\uE91B",
+    L"\uE7AD", L"\uE7AD", L"\uE8B7",
+};
+
+std::vector<SettingsPageDef> DescribeSettingsPages(EditableSettings& s) {
+    auto buttonField = [&s](int index, PCWSTR description = L"") {
+        return BoolField(
+            std::wstring(L"hideDefaultButtons.") +
+                kDefaultButtons[index].settingKey,
+            kDefaultButtonTitles[index], description,
+            &s.hideDefaultButtons[index], kDefaultButtonGlyphs[index], true);
+    };
+
+    std::vector<SettingsPageDef> pages;
+
+    SettingsPageDef builtIn;
+    builtIn.tag = L"builtIn";
+    builtIn.title = L"Built-in buttons";
+    builtIn.description =
+        L"Turn off the built-in File Explorer command bar elements you don't "
+        L"need. The separator of the contextual commands is hidden along with "
+        L"them, once none of them is left to show.";
+    builtIn.glyph = L"\uE7B3";
+    builtIn.fields = {
+        HeaderField(L"Buttons"),
+        buttonField(0),
+        buttonField(1),
+        buttonField(2),
+        buttonField(3),
+        buttonField(4),
+        buttonField(5),
+        buttonField(6),
+        buttonField(7),
+        buttonField(8),
+        BoolField(L"hideDefaultButtons.moreOptions",
+                  L"See more (the three dots menu)", L"", &s.hideMoreButton,
+                  L"\uE712", true),
+        BoolField(L"hideDefaultButtons.details", L"Details pane toggle", L"",
+                  &s.hideDetailsButton, L"\uE946", true),
+        HeaderField(L"Contextual commands"),
+        buttonField(9, L"Shown when an image file is selected."),
+        buttonField(10, L"Shown when an image file is selected."),
+        buttonField(11, L"Shown when an image file is selected."),
+        buttonField(12, L"Shown when a zip or other archive file is selected."),
+        HeaderField(L"Separators"),
+        BoolField(L"hideDefaultButtons.separatorAfterNew",
+                  L"Vertical separator after New", L"",
+                  &s.hideSeparatorAfterNew, L"\uE76F", true),
+        BoolField(L"hideDefaultButtons.separatorAfterDelete",
+                  L"Vertical separator after Delete", L"",
+                  &s.hideSeparatorAfterDelete, L"\uE76F", true),
+        BoolField(L"hideDefaultButtons.separatorAfterView",
+                  L"Vertical separator after View", L"",
+                  &s.hideSeparatorAfterView, L"\uE76F", true),
+    };
+    pages.push_back(std::move(builtIn));
+
+    SettingsPageDef newPlus;
+    newPlus.tag = L"newPlus";
+    newPlus.title = L"New+";
+    newPlus.description =
+        L"Replace Explorer's New button with a New+ button which creates files "
+        L"and folders from your own templates, the way the PowerToys New+ "
+        L"utility does. PowerToys isn't required.";
+    newPlus.glyph = L"\uE8F4";
+    newPlus.fields = {
+        BoolField(L"newPlus.enabled", L"Replace New with New+",
+                  L"Put a New+ button in the place of Explorer's New button.",
+                  &s.newPlus.enabled, L"\uE8F4"),
+        HeaderField(L"Button"),
+        BoolField(L"newPlus.showLabel", L"Show the button label",
+                  L"Show the label next to the icon, with a chevron after the "
+                  L"text. When disabled, the label becomes the tooltip.",
+                  &s.newPlus.showLabel, L"\uE8E9"),
+        StringField(L"newPlus.buttonLabel", L"Button label",
+                    L"Leave empty for an icon-only button without a chevron.",
+                    &s.newPlus.buttonLabel, false, L"\uE8D2"),
+        StringField(L"newPlus.buttonIcon", L"Button icon glyph or icon path",
+                    L"Leave empty to reuse the icon of Explorer's own New "
+                    L"button. Alternatively, a Segoe Fluent Icons code point "
+                    L"such as E710, or an .exe, .dll or .ico path with an "
+                    L"optional icon index.",
+                    &s.newPlus.buttonIcon, true, L"\uE8B9"),
+        BoolField(L"newPlus.keepOriginalNewButton",
+                  L"Keep Explorer's New button",
+                  L"Show the built-in New button next to the New+ button "
+                  L"instead of hiding it.",
+                  &s.newPlus.keepOriginalNewButton, L"\uE710"),
+        HeaderField(L"Templates"),
+        StringField(L"newPlus.templateFolder", L"Templates folder",
+                    L"Leave empty to use the folder configured in PowerToys, "
+                    L"or %LOCALAPPDATA%\\Microsoft\\PowerToys\\NewPlus\\"
+                    L"Templates if PowerToys isn't installed.",
+                    &s.newPlus.templateFolder, true, L"\uE8B7"),
+        BoolField(L"newPlus.showIcons", L"Show template icons",
+                  L"Disable it if opening the menu feels slow with many "
+                  L"templates.",
+                  &s.newPlus.showIcons, L"\uE8B9"),
+        BoolField(L"newPlus.showTemplatesFolderItem",
+                  L"Add an \"Open templates folder\" entry",
+                  L"Opens the templates folder, creating it if it doesn't "
+                  L"exist yet.",
+                  &s.newPlus.showTemplatesFolderItem, L"\uE838"),
+    };
+    pages.push_back(std::move(newPlus));
+
+    SettingsPageDef contextMenu;
+    contextMenu.tag = L"contextMenu";
+    contextMenu.title = L"Context menu item";
+    contextMenu.description =
+        L"Add an item which expands the real File Explorer shell context menu "
+        L"of the current selection or folder.";
+    contextMenu.glyph = L"\uE8FD";
+    contextMenu.fields = {
+        BoolField(L"contextMenuItem.enabled", L"Add the context menu item",
+                  L"Like right-clicking in File Explorer.",
+                  &s.contextMenuItem.enabled, L"\uE8FD"),
+        BoolField(L"contextMenuItem.useNilesoftShell",
+                  L"Let File Explorer show the menu (for Nilesoft Shell)",
+                  L"Ask the file list to show its own context menu instead of "
+                  L"building the classic shell menu. The menu is positioned by "
+                  L"Explorer.",
+                  &s.contextMenuItem.useNilesoftShell, L"\uE7C4"),
+        HeaderField(L"Appearance"),
+        BoolField(L"contextMenuItem.showLabel", L"Show the item label",
+                  L"When disabled, only the icon is shown and the label "
+                  L"becomes the tooltip.",
+                  &s.contextMenuItem.showLabel, L"\uE8E9"),
+        StringField(L"contextMenuItem.buttonLabel", L"Item label",
+                    L"The label and tooltip of the context menu item.",
+                    &s.contextMenuItem.buttonLabel, false, L"\uE8D2"),
+        StringField(L"contextMenuItem.buttonIcon",
+                    L"Item icon glyph or icon path",
+                    L"A Segoe Fluent Icons code point, or an .exe, .dll or "
+                    L".ico path with an optional icon index. Leave empty for "
+                    L"the default glyph.",
+                    &s.contextMenuItem.buttonIcon, true, L"\uE8B9"),
+    };
+    pages.push_back(std::move(contextMenu));
+
+    SettingsPageDef general;
+    general.tag = L"general";
+    general.title = L"General";
+    general.glyph = L"\uE713";
+    general.fields = {
+        HeaderField(L"Settings item"),
+        BoolField(L"showSettingsItem",
+                  L"Show Explorer Command Bar Settings Item",
+                  L"Show a cog button in the command bar which opens this "
+                  L"window.",
+                  &s.showSettingsItem, L"\uE713"),
+        IntField(L"settingsItemOrder",
+                 L"Explorer Command Bar Settings Item Order",
+                 L"The position of the cog button among the toolbar items. 0 "
+                 L"places it before the first item, 1 after the first item, "
+                 L"and so on. -1 places it after the last item.",
+                 &s.settingsItemOrder, -1, L"\uE8CB"),
+        HeaderField(L"Layout"),
+        BoolField(L"placeOnSecondaryBar", L"Place buttons on the right side",
+                  L"Show custom buttons on the right side of File Explorer "
+                  L"(next to the Details and Preview pane toggles) instead of "
+                  L"the main toolbar.",
+                  &s.placeOnSecondaryBar, L"\uE90D"),
+        IntField(L"itemSpacing", L"Item spacing (pixels at 100% scaling)",
+                 L"Horizontal spacing between the command bar buttons. -1 "
+                 L"leaves the default spacing unchanged. Any other value also "
+                 L"removes the built-in buttons' minimum width.",
+                 &s.itemSpacing, -1, L"\uE799"),
+        HeaderField(L"Menus"),
+        BoolField(L"openMenuOnHover", L"Open menus on hover",
+                  L"Open dropdown menus by hovering over the button instead of "
+                  L"clicking it. Applies to the New+ button as well.",
+                  &s.openMenuOnHover, L"\uE8B0"),
+        IntField(L"menuHoverDelay", L"Hover delay (milliseconds)",
+                 L"How long the cursor has to stay over the button before the "
+                 L"menu opens.",
+                 &s.menuHoverDelay, 0, L"\uE916"),
+    };
+    pages.push_back(std::move(general));
+
+    return pages;
+}
+
+struct RegEntry {
+    std::wstring name;
+    bool isString = false;
+    std::wstring text;
+    DWORD number = 0;
+    bool operator==(RegEntry const&) const = default;
+};
+
+RegEntry StringEntry(std::wstring name, std::wstring const& value) {
+    RegEntry entry;
+    entry.name = std::move(name);
+    entry.isString = true;
+    for (WCHAR c : value) {
+        if (c != L'\r' && c != L'\n')
+            entry.text += c;
+    }
+    return entry;
+}
+
+RegEntry NumberEntry(std::wstring name, int value) {
+    RegEntry entry;
+    entry.name = std::move(name);
+    entry.number = (DWORD)value;
+    return entry;
+}
+
+// Mirrors LoadActionItem, which stops at the first empty item.
+bool IsEmptyActionItem(ActionItem const& item) {
+    if (!item.name.empty() || !item.command.empty())
+        return false;
+    return std::all_of(item.subItems.begin(), item.subItems.end(),
+                       IsEmptyActionItem);
+}
+
+void AppendItemEntries(std::vector<RegEntry>& entries,
+                       std::wstring const& prefix,
+                       ActionItem const& item,
+                       int depth) {
+    if (depth < kMaxMenuDepth)
+        entries.push_back(
+            StringEntry(prefix + L".type", item.isMenu ? L"menu" : L"button"));
+    entries.push_back(StringEntry(prefix + L".name", item.name));
+    entries.push_back(StringEntry(prefix + L".command", item.command));
+    entries.push_back(StringEntry(prefix + L".parameters", item.parameters));
+    entries.push_back(StringEntry(prefix + L".iconGlyph", item.icon));
+    entries.push_back(NumberEntry(prefix + L".hideIcon", item.hideIcon));
+    if (depth == 0) {
+        entries.push_back(NumberEntry(prefix + L".showLabel", item.showLabel));
+        entries.push_back(StringEntry(prefix + L".labelText", item.labelText));
+    }
+    entries.push_back(
+        NumberEntry(prefix + L".separatorAfter", item.separatorAfter));
+
+    if (depth < kMaxMenuDepth) {
+        int index = 0;
+        for (auto const& subItem : item.subItems) {
+            if (IsEmptyActionItem(subItem))
+                continue;
+            AppendItemEntries(
+                entries,
+                prefix + L".subItems[" + std::to_wstring(index++) + L"]",
+                subItem, depth + 1);
+        }
+    }
+}
+
+std::vector<RegEntry> BuildRegEntries(EditableSettings& settings) {
+    std::vector<RegEntry> entries;
+    int index = 0;
+    for (auto const& item : settings.items) {
+        if (IsEmptyActionItem(item))
+            continue;
+        AppendItemEntries(entries,
+                          L"items[" + std::to_wstring(index++) + L"]", item, 0);
+    }
+
+    for (auto const& page : DescribeSettingsPages(settings)) {
+        for (auto const& field : page.fields) {
+            switch (field.kind) {
+                case SettingKind::Bool:
+                    entries.push_back(
+                        NumberEntry(field.key, *(bool*)field.value));
+                    break;
+                case SettingKind::Int:
+                    entries.push_back(
+                        NumberEntry(field.key, *(int*)field.value));
+                    break;
+                case SettingKind::String:
+                    entries.push_back(
+                        StringEntry(field.key, *(std::wstring*)field.value));
+                    break;
+                case SettingKind::Header:
+                    break;
+            }
+        }
+    }
+    return entries;
+}
+
+constexpr WCHAR kModRegistryPath[] =
+    L"SOFTWARE\\Windhawk\\Engine\\Mods\\" WH_MOD_ID;
+
+struct SaveResult {
+    bool succeeded = false;
+    std::wstring error;
+};
+
+std::vector<std::wstring> ReadRegistryValueNames(HKEY key) {
+    std::vector<std::wstring> names;
+    for (DWORD i = 0;; i++) {
+        WCHAR name[1024];
+        DWORD length = ARRAYSIZE(name);
+        LSTATUS status = RegEnumValueW(key, i, name, &length, nullptr, nullptr,
+                                       nullptr, nullptr);
+        if (status == ERROR_SUCCESS)
+            names.push_back(name);
+        else if (status != ERROR_MORE_DATA)
+            break;
+    }
+    return names;
+}
+
+LSTATUS WriteSettingsToRegistry(std::vector<RegEntry> const& entries,
+                                std::vector<std::wstring> const& staleNames,
+                                DWORD changeTime) {
+    HKEY modKey;
+    LSTATUS status =
+        RegOpenKeyExW(HKEY_LOCAL_MACHINE, kModRegistryPath, 0,
+                      KEY_SET_VALUE | KEY_CREATE_SUB_KEY, &modKey);
+    if (status != ERROR_SUCCESS)
+        return status;
+
+    HKEY settingsKey;
+    status = RegCreateKeyExW(modKey, L"Settings", 0, nullptr, 0, KEY_SET_VALUE,
+                             nullptr, &settingsKey, nullptr);
+    if (status == ERROR_SUCCESS) {
+        for (auto const& entry : entries) {
+            if (entry.isString) {
+                status = RegSetValueExW(
+                    settingsKey, entry.name.c_str(), 0, REG_SZ,
+                    (BYTE const*)entry.text.c_str(),
+                    (DWORD)((entry.text.size() + 1) * sizeof(WCHAR)));
+            } else {
+                status = RegSetValueExW(settingsKey, entry.name.c_str(), 0,
+                                        REG_DWORD, (BYTE const*)&entry.number,
+                                        sizeof(entry.number));
+            }
+            if (status != ERROR_SUCCESS)
+                break;
+        }
+        if (status == ERROR_SUCCESS) {
+            for (auto const& name : staleNames)
+                RegDeleteValueW(settingsKey, name.c_str());
+        }
+        RegCloseKey(settingsKey);
+    }
+
+    if (status == ERROR_SUCCESS) {
+        status = RegSetValueExW(modKey, L"SettingsChangeTime", 0, REG_DWORD,
+                                (BYTE const*)&changeTime, sizeof(changeTime));
+    }
+    RegCloseKey(modKey);
+    return status;
+}
+
+std::wstring EscapeRegFileString(std::wstring const& value) {
+    std::wstring result;
+    for (WCHAR c : value) {
+        if (c == L'\\' || c == L'"')
+            result += L'\\';
+        result += c;
+    }
+    return result;
+}
+
+std::wstring BuildRegFile(std::vector<RegEntry> const& entries,
+                          std::vector<std::wstring> const& staleNames,
+                          DWORD changeTime) {
+    std::wstring modKey =
+        std::wstring(L"HKEY_LOCAL_MACHINE\\") + kModRegistryPath;
+    std::wstring text = L"Windows Registry Editor Version 5.00\r\n\r\n";
+    text += L"[" + modKey + L"\\Settings]\r\n";
+    for (auto const& entry : entries) {
+        text += L"\"" + EscapeRegFileString(entry.name) + L"\"=";
+        if (entry.isString) {
+            text += L"\"" + EscapeRegFileString(entry.text) + L"\"";
+        } else {
+            WCHAR number[16];
+            swprintf(number, ARRAYSIZE(number), L"dword:%08x", entry.number);
+            text += number;
+        }
+        text += L"\r\n";
+    }
+    for (auto const& name : staleNames)
+        text += L"\"" + EscapeRegFileString(name) + L"\"=-\r\n";
+
+    WCHAR time[32];
+    swprintf(time, ARRAYSIZE(time), L"dword:%08x", changeTime);
+    text += L"\r\n[" + modKey + L"]\r\n\"SettingsChangeTime\"=" + time +
+            L"\r\n";
+    return text;
+}
+
+bool WriteUtf16File(std::wstring const& path, std::wstring const& text) {
+    HANDLE hFile = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                               CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE)
+        return false;
+    WCHAR bom = 0xFEFF;
+    DWORD written = 0;
+    bool succeeded =
+        WriteFile(hFile, &bom, sizeof(bom), &written, nullptr) &&
+        WriteFile(hFile, text.data(), (DWORD)(text.size() * sizeof(WCHAR)),
+                  &written, nullptr);
+    CloseHandle(hFile);
+    return succeeded;
+}
+
+DWORD RunElevatedRegImport(std::wstring const& regFilePath, HWND hOwnerWnd) {
+    WCHAR systemDir[MAX_PATH];
+    if (!GetSystemDirectoryW(systemDir, ARRAYSIZE(systemDir)))
+        return GetLastError();
+    std::wstring regExe = JoinPath(systemDir, L"reg.exe");
+    std::wstring parameters = L"import \"" + regFilePath + L"\"";
+
+    SHELLEXECUTEINFOW execInfo{};
+    execInfo.cbSize = sizeof(execInfo);
+    execInfo.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+    execInfo.hwnd = hOwnerWnd;
+    execInfo.lpVerb = L"runas";
+    execInfo.lpFile = regExe.c_str();
+    execInfo.lpParameters = parameters.c_str();
+    execInfo.nShow = SW_HIDE;
+    if (!ShellExecuteExW(&execInfo))
+        return GetLastError();
+    if (!execInfo.hProcess)
+        return ERROR_GEN_FAILURE;
+
+    WaitForSingleObject(execInfo.hProcess, INFINITE);
+    DWORD exitCode = 1;
+    GetExitCodeProcess(execInfo.hProcess, &exitCode);
+    CloseHandle(execInfo.hProcess);
+    if (exitCode != 0) {
+        Wh_Log(L"reg.exe import exited with %u", exitCode);
+        return ERROR_GEN_FAILURE;
+    }
+    return ERROR_SUCCESS;
+}
+
+// Windhawk keeps mod settings in a registry key which File Explorer can only
+// read, so unless the process happens to be elevated, the settings are
+// imported with an elevated reg.exe. Bumping SettingsChangeTime makes the
+// engine call Wh_ModSettingsChanged, just like a change made in Windhawk.
+SaveResult WriteModSettings(std::vector<RegEntry> const& entries,
+                            HWND hOwnerWnd) {
+    SaveResult result;
+    HKEY modKey;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kModRegistryPath, 0, KEY_READ,
+                      &modKey) != ERROR_SUCCESS) {
+        result.error =
+            L"The settings of this mod weren't found in the registry. Saving "
+            L"from this window requires the installed (not portable) version "
+            L"of Windhawk.";
+        return result;
+    }
+
+    DWORD changeTime = 0;
+    DWORD size = sizeof(changeTime);
+    RegGetValueW(modKey, nullptr, L"SettingsChangeTime", RRF_RT_REG_DWORD,
+                 nullptr, &changeTime, &size);
+
+    std::vector<std::wstring> existingNames;
+    HKEY settingsKey;
+    if (RegOpenKeyExW(modKey, L"Settings", 0, KEY_READ, &settingsKey) ==
+        ERROR_SUCCESS) {
+        existingNames = ReadRegistryValueNames(settingsKey);
+        RegCloseKey(settingsKey);
+    }
+    RegCloseKey(modKey);
+
+    std::vector<std::wstring> staleNames;
+    for (auto const& name : existingNames) {
+        bool used = std::any_of(entries.begin(), entries.end(),
+                                [&name](RegEntry const& entry) {
+                                    return _wcsicmp(entry.name.c_str(),
+                                                    name.c_str()) == 0;
+                                });
+        if (!used)
+            staleNames.push_back(name);
+    }
+
+    DWORD newChangeTime = std::max((DWORD)time(nullptr), changeTime + 1);
+
+    LSTATUS status =
+        WriteSettingsToRegistry(entries, staleNames, newChangeTime);
+    if (status == ERROR_SUCCESS) {
+        result.succeeded = true;
+        return result;
+    }
+    if (status != ERROR_ACCESS_DENIED) {
+        result.error = L"Writing the settings failed (error " +
+                       std::to_wstring(status) + L").";
+        return result;
+    }
+
+    WCHAR tempDir[MAX_PATH];
+    if (!GetTempPathW(ARRAYSIZE(tempDir), tempDir)) {
+        result.error = L"The temporary folder wasn't found.";
+        return result;
+    }
+    std::wstring regFilePath =
+        JoinPath(tempDir, L"windhawk-explorer-command-bar-" +
+                              std::to_wstring(GetTickCount64()) + L".reg");
+    if (!WriteUtf16File(regFilePath,
+                        BuildRegFile(entries, staleNames, newChangeTime))) {
+        result.error = L"Couldn't write " + regFilePath + L".";
+        return result;
+    }
+
+    DWORD error = RunElevatedRegImport(regFilePath, hOwnerWnd);
+    DeleteFileW(regFilePath.c_str());
+    if (error == ERROR_SUCCESS) {
+        result.succeeded = true;
+    } else if (error == ERROR_CANCELLED) {
+        result.error =
+            L"The administrator prompt was canceled. Windhawk keeps mod "
+            L"settings in a protected registry key, so saving them needs "
+            L"administrator approval.";
+    } else {
+        result.error = L"Importing the settings failed (error " +
+                       std::to_wstring(error) + L").";
+    }
+    return result;
+}
+
+struct SaveJob {
+    std::vector<RegEntry> entries;
+    EditableSettings settings;
+    SaveResult result;
+};
+
+PCWSTR InternalCommandGlyph(std::wstring_view cmd) {
+    if (IsCommandMatch(cmd, L"OpenWith"))
+        return L"\uE7AC";
+    if (IsCommandMatch(cmd, L"TogglePreview"))
+        return L"\uE8A1";
+    if (IsCommandMatch(cmd, L"ToggleDetails"))
+        return L"\uE9F9";
+    if (IsCommandMatch(cmd, L"FolderOptions"))
+        return L"\uE713";
+    return nullptr;
+}
+
+ActionItem MakeNewActionItem(bool isMenu, int depth) {
+    ActionItem item;
+    item.isMenu = isMenu && depth < kMaxMenuDepth;
+    if (depth == 0) {
+        item.name = item.isMenu ? L"New menu" : L"New button";
+        item.icon = item.isMenu ? L"E81E" : L"E8A7";
+    } else {
+        item.name = item.isMenu ? L"New submenu" : L"New entry";
+    }
+    if (item.isMenu)
+        item.subItems.push_back(MakeNewActionItem(false, depth + 1));
+    return item;
+}
+
+PCWSTR ItemKindName(ActionItem const& item, int depth) {
+    bool isMenu = item.isMenu && depth < kMaxMenuDepth;
+    if (depth == 0)
+        return isMenu ? L"Dropdown menu" : L"Toolbar button";
+    if (depth == 1)
+        return isMenu ? L"Submenu" : L"Menu entry";
+    return L"Submenu entry";
+}
+
+std::wstring DescribeActionItem(ActionItem const& item, int depth) {
+    std::wstring text;
+    if (item.isMenu && depth < kMaxMenuDepth) {
+        size_t count = item.subItems.size();
+        text = depth == 0 ? L"Dropdown menu" : L"Submenu";
+        text += L" \u00B7 " + std::to_wstring(count) +
+                (count == 1 ? L" entry" : L" entries");
+    } else if (!item.command.empty()) {
+        text = item.command;
+        if (!item.parameters.empty())
+            text += L" " + item.parameters;
+    } else {
+        text = L"No command";
+    }
+    if (item.separatorAfter)
+        text += L" \u00B7 separator after";
+    return text;
+}
+
+winrt::Windows::Foundation::IInspectable BoxString(std::wstring_view text) {
+    return winrt::box_value(winrt::hstring{text});
+}
+
+mux::GridLength StarLength(double value = 1) {
+    return {value, mux::GridUnitType::Star};
+}
+
+mux::GridLength AutoLength() {
+    return {1, mux::GridUnitType::Auto};
+}
+
+mux::GridLength PixelLength(double value) {
+    return {value, mux::GridUnitType::Pixel};
+}
+
+void AddGridColumn(muxc::Grid const& grid, mux::GridLength length) {
+    muxc::ColumnDefinition column;
+    column.Width(length);
+    grid.ColumnDefinitions().Append(column);
+}
+
+void AddGridRow(muxc::Grid const& grid, mux::GridLength length) {
+    muxc::RowDefinition row;
+    row.Height(length);
+    grid.RowDefinitions().Append(row);
+}
+
+muxc::FontIcon MakeGlyph(PCWSTR glyph, double size) {
+    muxc::FontIcon icon;
+    icon.FontFamily(muxm::FontFamily(L"Segoe Fluent Icons"));
+    icon.Glyph(glyph);
+    icon.FontSize(size);
+    return icon;
+}
+
+muxc::TextBox MakeTextBox(std::wstring const& text, PCWSTR placeholder) {
+    muxc::TextBox textBox;
+    textBox.Text(text);
+    if (placeholder)
+        textBox.PlaceholderText(placeholder);
+    return textBox;
+}
+
+muxc::Button MakeTextButton(PCWSTR text) {
+    muxc::Button button;
+    button.Content(BoxString(text));
+    return button;
+}
+
+muxc::IconElement MakeItemIcon(ActionItem const& item, int depth, double size) {
+    muxc::IconElement icon{nullptr};
+    if (!item.hideIcon) {
+        try {
+            icon = TryCreateIconElement(item.icon, item.command);
+        } catch (...) {
+            Wh_Log(L"Error %08X", winrt::to_hresult().value);
+        }
+    }
+    if (!icon) {
+        PCWSTR glyph = InternalCommandGlyph(item.command);
+        if (item.isMenu && depth < kMaxMenuDepth)
+            glyph = L"\uE8FD";
+        else if (!glyph)
+            glyph = L"\uE7C3";
+        auto fontIcon = MakeGlyph(glyph, size);
+        if (item.hideIcon)
+            fontIcon.Opacity(0.4);
+        icon = fontIcon;
+    }
+    icon.Width(size);
+    icon.Height(size);
+    return icon;
+}
+
+std::wstring BrowseForFile(HWND hOwnerWnd,
+                           PCWSTR title,
+                           COMDLG_FILTERSPEC const* filters,
+                           UINT filterCount) {
+    winrt::com_ptr<IFileOpenDialog> dialog;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr,
+                                CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(dialog.put())))) {
+        return std::wstring();
+    }
+    dialog->SetTitle(title);
+    dialog->SetFileTypes(filterCount, filters);
+    DWORD options = 0;
+    dialog->GetOptions(&options);
+    dialog->SetOptions(options | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST |
+                       FOS_NOCHANGEDIR);
+    if (FAILED(dialog->Show(hOwnerWnd)))
+        return std::wstring();
+
+    winrt::com_ptr<IShellItem> result;
+    PWSTR path = nullptr;
+    if (FAILED(dialog->GetResult(result.put())) ||
+        FAILED(result->GetDisplayName(SIGDN_FILESYSPATH, &path)) || !path) {
+        return std::wstring();
+    }
+    std::wstring resultPath = path;
+    CoTaskMemFree(path);
+    return resultPath;
+}
+
+constexpr UINT kSettingsWindowCloseMsg = WM_APP + 1;
+constexpr PCWSTR kGlyphListUrl =
+    L"https://learn.microsoft.com/en-us/windows/apps/design/iconography/"
+    L"segoe-fluent-icons-font";
+
+void OpenUrl(std::wstring url) {
+    RunShellWorkOnWorkerThread([url = std::move(url)]() {
+        ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr,
+                      SW_SHOWNORMAL);
+    });
+}
+
+class SettingsWindow;
+
+// Only accessed on the thread of the settings window.
+SettingsWindow* g_settingsWindow;
+
+std::mutex g_settingsWindowMutex;
+HWND g_settingsWindowHwnd;
+std::atomic<bool> g_settingsWindowCreating;
+
+class SettingsWindow {
+   public:
+    ~SettingsWindow() { Shutdown(); }
+
+    bool Create(HWND hHintWnd);
+    HWND Hwnd() const { return m_hwnd; }
+    void Shutdown();
+    LRESULT HandleMessage(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+    void OnSaveCompleted(SaveJob const& job);
+
+   private:
+    void LoadStyles();
+    mux::Style FindStyle(PCWSTR key);
+    mux::UIElement BuildRoot();
+    void ApplyTheme();
+    void ShowPage(std::wstring const& tag);
+    void NavigateTo(std::wstring const& tag);
+
+    muxc::TextBlock MakeText(std::wstring const& text,
+                             mux::Style const& style);
+    muxc::StackPanel MakePageHeader(std::wstring const& title,
+                                    std::wstring const& description);
+    muxc::Border MakeCard(PCWSTR glyph,
+                          std::wstring const& title,
+                          std::wstring const& description,
+                          mux::FrameworkElement const& control,
+                          bool wide);
+    mux::FrameworkElement MakeFieldControl(SettingField const& field);
+    mux::FrameworkElement BuildSettingsPage(SettingsPageDef const& page);
+
+    mux::FrameworkElement BuildItemsPage();
+    muxc::CommandBar BuildItemToolbar();
+    void RefreshItemsPage();
+    void RebuildPreview();
+    void UpdatePreviewSelection();
+    muxc::AppBarButton MakePreviewButton(muxc::IconElement const& icon,
+                                         std::wstring const& label,
+                                         bool showLabel,
+                                         bool chevron,
+                                         std::wstring const& pageTag);
+    muxc::AppBarToggleButton MakePreviewItem(ActionItem const& item, int index);
+    void AppendPreviewMenuEntries(
+        std::vector<ActionItem> const& items,
+        std::vector<int> const& parentPath,
+        wfc::IVector<muxc::MenuFlyoutItemBase> const& target);
+    void SelectItem(std::vector<int> const& path);
+    muxc::AppBarToggleButton MakePreviewBuiltIn(int id,
+                                                muxc::IconElement const& icon,
+                                                std::wstring const& label,
+                                                bool showLabel,
+                                                bool chevron);
+    void SelectBuiltIn(int id);
+    bool* BuiltInHiddenField(int id);
+    void BuildBuiltInEditor();
+    void BuildItemEditor();
+    void UpdateItemToolbar();
+    void DeferItemsPageRefresh();
+    void OnItemEdited();
+
+    std::vector<ActionItem>* SiblingsOf(std::vector<int> const& path);
+    std::vector<ActionItem>* ChildrenOf(std::vector<int> const& path);
+    ActionItem* ItemAt(std::vector<int> const& path);
+    ActionItem* EditedItem(std::vector<int> const& path, int generation);
+
+    void AddTopLevelItem(bool isMenu);
+    void AddMenuEntry(bool isMenu);
+    void MoveSelectedItem(int delta);
+    void DuplicateSelectedItem();
+    void DeleteSelectedItem();
+
+    void OnModelChanged();
+    void UpdateFooter();
+    void ShowMessage(muxc::InfoBarSeverity severity,
+                     std::wstring const& title,
+                     std::wstring const& message);
+    void Save(bool closeAfter);
+    void Discard();
+    void RequestClose();
+    void ShowUnsavedChangesDialog();
+    void ForceClose();
+    void CloseXaml();
+    std::wstring Browse(PCWSTR title,
+                        COMDLG_FILTERSPEC const* filters,
+                        UINT filterCount);
+
+    HWND m_hwnd = nullptr;
+    HWND m_hostWnd = nullptr;
+    HICON m_hIconLarge = nullptr;
+    HICON m_hIconSmall = nullptr;
+    muxh::DesktopWindowXamlSource m_source{nullptr};
+    mux::ResourceDictionary m_resources{nullptr};
+    mux::Style m_cardStyle{nullptr};
+    mux::Style m_secondaryTextStyle{nullptr};
+    mux::Style m_sectionHeaderStyle{nullptr};
+    mux::Style m_pageTitleStyle{nullptr};
+    muxc::Grid m_root{nullptr};
+    muxc::Grid m_pageHost{nullptr};
+    muxc::InfoBar m_infoBar{nullptr};
+    muxc::TextBlock m_statusText{nullptr};
+    muxc::ProgressRing m_savingRing{nullptr};
+    muxc::Button m_saveButton{nullptr};
+    muxc::Button m_discardButton{nullptr};
+    muxc::ContentDialog m_dialog{nullptr};
+
+    std::wstring m_currentPage;
+    EditableSettings m_model;
+    EditableSettings m_saved;
+    std::vector<RegEntry> m_savedEntries;
+    bool m_dirty = false;
+    bool m_saving = false;
+    bool m_closeAfterSave = false;
+    int m_modalDepth = 0;
+
+    std::vector<std::pair<std::wstring, muxc::RadioButton>> m_navButtons;
+
+    std::vector<int> m_selectedPath;
+    muxc::Border m_previewHost{nullptr};
+    std::vector<muxc::AppBarToggleButton> m_previewItems;
+    std::vector<std::pair<int, muxc::AppBarToggleButton>> m_previewBuiltIns;
+    int m_selectedBuiltIn = -1;
+    muxc::StackPanel m_editorPanel{nullptr};
+    muxc::Border m_editorIconPreview{nullptr};
+    muxc::AppBarButton m_moveUpButton{nullptr};
+    muxc::AppBarButton m_moveDownButton{nullptr};
+    muxc::AppBarButton m_duplicateButton{nullptr};
+    muxc::AppBarButton m_deleteButton{nullptr};
+    muxc::MenuFlyoutItem m_addEntryItem{nullptr};
+    muxc::MenuFlyoutItem m_addSubmenuItem{nullptr};
+    int m_editorGeneration = 0;
+};
+
+std::wstring SettingsWindowClassName() {
+    return std::wstring(L"WindhawkSettingsWindow_") + WH_MOD_ID;
+}
+
+LRESULT CALLBACK SettingsWindowProc(HWND hWnd,
+                                    UINT uMsg,
+                                    WPARAM wParam,
+                                    LPARAM lParam) {
+    if (uMsg == WM_NCCREATE) {
+        auto* createStruct = (CREATESTRUCTW*)lParam;
+        SetWindowLongPtrW(hWnd, GWLP_USERDATA,
+                          (LONG_PTR)createStruct->lpCreateParams);
+    }
+    auto* window = (SettingsWindow*)GetWindowLongPtrW(hWnd, GWLP_USERDATA);
+    if (!window)
+        return DefWindowProcW(hWnd, uMsg, wParam, lParam);
+
+    LRESULT result;
+    try {
+        result = window->HandleMessage(hWnd, uMsg, wParam, lParam);
+    } catch (...) {
+        Wh_Log(L"Error %08X", winrt::to_hresult().value);
+        result = DefWindowProcW(hWnd, uMsg, wParam, lParam);
+    }
+
+    // The window object lives as long as its window.
+    if (uMsg == WM_NCDESTROY) {
+        SetWindowLongPtrW(hWnd, GWLP_USERDATA, 0);
+        delete window;
+    }
+    return result;
+}
+
+// Closes the settings window before the File Explorer window whose thread it
+// runs on goes away.
+LRESULT CALLBACK SettingsHostSubclassProc(HWND hWnd,
+                                          UINT uMsg,
+                                          WPARAM wParam,
+                                          LPARAM lParam,
+                                          UINT_PTR subclassId,
+                                          DWORD_PTR refData) {
+    if (uMsg == WM_DESTROY) {
+        RemoveWindowSubclass(hWnd, SettingsHostSubclassProc, subclassId);
+        HWND hSettingsWnd = (HWND)refData;
+        if (IsWindow(hSettingsWnd))
+            DestroyWindow(hSettingsWnd);
+    }
+    return DefSubclassProc(hWnd, uMsg, wParam, lParam);
+}
+
+// The step the settings window thread is at, for error reports.
+PCWSTR g_settingsWindowStep = L"";
+
+void SetSettingsWindowStep(PCWSTR step) {
+    g_settingsWindowStep = step;
+    Wh_Log(L"Settings window: %s", step);
+}
+
+// Must be called from a catch block.
+std::wstring DescribeCurrentException() {
+    WCHAR buffer[64];
+    try {
+        throw;
+    } catch (winrt::hresult_error const& e) {
+        swprintf(buffer, ARRAYSIZE(buffer), L"%08X", (DWORD)e.code().value);
+        return std::wstring(buffer) + L": " + std::wstring(e.message());
+    } catch (std::exception const& e) {
+        std::string what = e.what();
+        return std::wstring(what.begin(), what.end());
+    } catch (...) {
+        swprintf(buffer, ARRAYSIZE(buffer), L"%08X",
+                 (DWORD)winrt::to_hresult().value);
+        return buffer;
+    }
+}
+
+void ReportSettingsWindowError(std::wstring const& error) {
+    std::wstring text = L"The settings window couldn't be opened.\n\nStep: ";
+    text += g_settingsWindowStep;
+    text += L"\nError: " + error;
+    Wh_Log(L"%s", text.c_str());
+    MessageBoxW(nullptr, text.c_str(), L"Explorer Command Bar Settings",
+                MB_ICONERROR | MB_SETFOREGROUND);
+}
+
+bool SettingsWindow::Create(HWND hHintWnd) {
+    SetSettingsWindowStep(L"reading the settings");
+    m_model = SnapshotSettings();
+    m_saved = m_model;
+    m_savedEntries = BuildRegEntries(m_model);
+
+    HMONITOR monitor = MonitorFromWindow(hHintWnd, MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFO monitorInfo{sizeof(monitorInfo)};
+    GetMonitorInfoW(monitor, &monitorInfo);
+    RECT work = monitorInfo.rcWork;
+
+    SetSettingsWindowStep(L"creating the window");
+    m_hwnd = CreateWindowExW(
+        WS_EX_NOREDIRECTIONBITMAP, SettingsWindowClassName().c_str(),
+        L"Explorer Command Bar Settings", WS_OVERLAPPEDWINDOW, work.left,
+        work.top, 800, 600, nullptr, nullptr, GetCurrentModuleHandle(), this);
+    if (!m_hwnd) {
+        ReportSettingsWindowError(L"CreateWindowEx failed with error " +
+                                  std::to_wstring(GetLastError()));
+        return false;
+    }
+
+    UINT dpi = GetDpiForWindow(m_hwnd);
+    if (!dpi)
+        dpi = 96;
+    int workWidth = work.right - work.left;
+    int workHeight = work.bottom - work.top;
+    int width = std::min(MulDiv(1100, dpi, 96), workWidth);
+    int height = std::min(MulDiv(760, dpi, 96), workHeight);
+    SetWindowPos(m_hwnd, nullptr, work.left + (workWidth - width) / 2,
+                 work.top + (workHeight - height) / 2, width, height,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+
+    WCHAR explorerPath[MAX_PATH];
+    if (GetModuleFileNameW(nullptr, explorerPath, ARRAYSIZE(explorerPath)) &&
+        ExtractIconExW(explorerPath, 0, &m_hIconLarge, &m_hIconSmall, 1)) {
+        SendMessageW(m_hwnd, WM_SETICON, ICON_BIG, (LPARAM)m_hIconLarge);
+        SendMessageW(m_hwnd, WM_SETICON, ICON_SMALL, (LPARAM)m_hIconSmall);
+    }
+
+    // No XAML system backdrop: setting one on the island crashes the WinUI
+    // version File Explorer ships with. The content has a solid background,
+    // and the caption is colored to match it.
+    try {
+        SetSettingsWindowStep(L"creating the XAML island");
+        m_source = muxh::DesktopWindowXamlSource();
+        SetSettingsWindowStep(L"attaching the XAML island to the window");
+        m_source.Initialize(
+            winrt::Microsoft::UI::WindowId{reinterpret_cast<uint64_t>(m_hwnd)});
+        SetSettingsWindowStep(L"building the content");
+        auto root = BuildRoot();
+        SetSettingsWindowStep(L"setting the content");
+        m_source.Content(root);
+
+        SetSettingsWindowStep(L"sizing the XAML island");
+        RECT client;
+        GetClientRect(m_hwnd, &client);
+        m_source.SiteBridge().MoveAndResize(
+            {0, 0, client.right - client.left, client.bottom - client.top});
+        m_source.SiteBridge().Show();
+    } catch (...) {
+        ReportSettingsWindowError(DescribeCurrentException());
+        return false;
+    }
+
+    if (hHintWnd &&
+        GetWindowThreadProcessId(hHintWnd, nullptr) == GetCurrentThreadId() &&
+        SetWindowSubclass(hHintWnd, SettingsHostSubclassProc, 0,
+                          (DWORD_PTR)m_hwnd)) {
+        m_hostWnd = hHintWnd;
+    }
+
+    SetSettingsWindowStep(L"showing the window");
+    ShowWindow(m_hwnd, SW_SHOWNORMAL);
+    SetForegroundWindow(m_hwnd);
+    return true;
+}
+
+void SettingsWindow::CloseXaml() {
+    if (m_dialog) {
+        try {
+            m_dialog.Hide();
+        } catch (...) {
+        }
+        m_dialog = nullptr;
+    }
+    if (m_source) {
+        try {
+            m_source.Close();
+        } catch (...) {
+            Wh_Log(L"Error %08X", winrt::to_hresult().value);
+        }
+        m_source = nullptr;
+    }
+}
+
+void SettingsWindow::Shutdown() {
+    CloseXaml();
+    if (m_hwnd && IsWindow(m_hwnd))
+        DestroyWindow(m_hwnd);
+    m_hwnd = nullptr;
+    if (m_hIconLarge) {
+        DestroyIcon(m_hIconLarge);
+        m_hIconLarge = nullptr;
+    }
+    if (m_hIconSmall) {
+        DestroyIcon(m_hIconSmall);
+        m_hIconSmall = nullptr;
+    }
+}
+
+LRESULT SettingsWindow::HandleMessage(HWND hWnd,
+                                      UINT uMsg,
+                                      WPARAM wParam,
+                                      LPARAM lParam) {
+    switch (uMsg) {
+        case WM_SIZE:
+            if (m_source) {
+                m_source.SiteBridge().MoveAndResize(
+                    {0, 0, LOWORD(lParam), HIWORD(lParam)});
+            }
+            break;
+
+        case WM_GETMINMAXINFO: {
+            UINT dpi = GetDpiForWindow(hWnd);
+            if (!dpi)
+                dpi = 96;
+            auto* info = (MINMAXINFO*)lParam;
+            info->ptMinTrackSize.x = MulDiv(860, dpi, 96);
+            info->ptMinTrackSize.y = MulDiv(560, dpi, 96);
+            return 0;
+        }
+
+        case WM_DPICHANGED: {
+            auto* rect = (RECT*)lParam;
+            SetWindowPos(hWnd, nullptr, rect->left, rect->top,
+                         rect->right - rect->left, rect->bottom - rect->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            return 0;
+        }
+
+        case WM_SETFOCUS:
+            if (HWND hChildWnd = GetWindow(hWnd, GW_CHILD))
+                SetFocus(hChildWnd);
+            return 0;
+
+        case WM_SETTINGCHANGE:
+            if (lParam && wcscmp((PCWSTR)lParam, L"ImmersiveColorSet") == 0)
+                ApplyTheme();
+            break;
+
+        case WM_ERASEBKGND:
+            return 1;
+
+        case WM_CLOSE:
+            RequestClose();
+            return 0;
+
+        case kSettingsWindowCloseMsg:
+            ForceClose();
+            return 0;
+
+        case WM_DESTROY:
+            CloseXaml();
+            if (m_hostWnd && IsWindow(m_hostWnd)) {
+                RemoveWindowSubclass(m_hostWnd, SettingsHostSubclassProc, 0);
+                m_hostWnd = nullptr;
+            }
+            return 0;
+
+        case WM_NCDESTROY: {
+            m_hwnd = nullptr;
+            if (g_settingsWindow == this)
+                g_settingsWindow = nullptr;
+            std::lock_guard<std::mutex> lock(g_settingsWindowMutex);
+            if (g_settingsWindowHwnd == hWnd)
+                g_settingsWindowHwnd = nullptr;
+            break;
+        }
+    }
+    return DefWindowProcW(hWnd, uMsg, wParam, lParam);
+}
+
+void SettingsWindow::LoadStyles() {
+    bool needsControlsResources = true;
+    try {
+        if (auto app = mux::Application::Current()) {
+            needsControlsResources = !app.Resources().TryLookup(
+                BoxString(L"CardBackgroundFillColorDefaultBrush"));
+        }
+    } catch (...) {
+    }
+
+    std::wstring xaml =
+        LR"(<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">)";
+    if (needsControlsResources) {
+        xaml += LR"(
+    <ResourceDictionary.MergedDictionaries>
+        <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls"/>
+    </ResourceDictionary.MergedDictionaries>)";
+    }
+    xaml += LR"(
+    <Style x:Key="CardStyle" TargetType="Border">
+        <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}"/>
+        <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="CornerRadius" Value="{ThemeResource ControlCornerRadius}"/>
+        <Setter Property="Padding" Value="16,12"/>
+        <Setter Property="MinHeight" Value="66"/>
+        <Setter Property="Margin" Value="0,0,0,4"/>
+    </Style>
+    <Style x:Key="SecondaryTextStyle" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="12"/>
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}"/>
+        <Setter Property="TextWrapping" Value="Wrap"/>
+    </Style>
+    <Style x:Key="SectionHeaderStyle" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="14"/>
+        <Setter Property="FontWeight" Value="SemiBold"/>
+        <Setter Property="Margin" Value="1,28,0,8"/>
+    </Style>
+    <Style x:Key="PageTitleStyle" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="28"/>
+        <Setter Property="FontWeight" Value="SemiBold"/>
+    </Style>
+    <Style x:Key="ContentAreaStyle" TargetType="Border">
+        <Setter Property="Background" Value="{ThemeResource LayerFillColorDefaultBrush}"/>
+        <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}"/>
+        <Setter Property="BorderThickness" Value="1,1,0,0"/>
+        <Setter Property="CornerRadius" Value="8,0,0,0"/>
+    </Style>
+    <Style x:Key="NavItemStyle" TargetType="RadioButton">
+        <Setter Property="Height" Value="36"/>
+        <Setter Property="Margin" Value="4,2,4,2"/>
+        <Setter Property="HorizontalAlignment" Value="Stretch"/>
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorPrimaryBrush}"/>
+        <Setter Property="UseSystemFocusVisuals" Value="True"/>
+        <Setter Property="FocusVisualMargin" Value="0"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="RadioButton">
+                    <Grid x:Name="RootGrid" Background="Transparent" CornerRadius="{ThemeResource ControlCornerRadius}">
+                        <VisualStateManager.VisualStateGroups>
+                            <VisualStateGroup x:Name="CommonStates">
+                                <VisualState x:Name="Normal"/>
+                                <VisualState x:Name="PointerOver">
+                                    <VisualState.Setters>
+                                        <Setter Target="HoverBackground.Background" Value="{ThemeResource SubtleFillColorSecondaryBrush}"/>
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Pressed">
+                                    <VisualState.Setters>
+                                        <Setter Target="HoverBackground.Background" Value="{ThemeResource SubtleFillColorTertiaryBrush}"/>
+                                        <Setter Target="ContentPresenter.Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}"/>
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Disabled">
+                                    <VisualState.Setters>
+                                        <Setter Target="ContentPresenter.Foreground" Value="{ThemeResource TextFillColorDisabledBrush}"/>
+                                    </VisualState.Setters>
+                                </VisualState>
+                            </VisualStateGroup>
+                            <VisualStateGroup x:Name="CheckStates">
+                                <VisualState x:Name="Checked">
+                                    <VisualState.Setters>
+                                        <Setter Target="SelectedBackground.Opacity" Value="1"/>
+                                        <Setter Target="SelectionPill.Opacity" Value="1"/>
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Unchecked"/>
+                                <VisualState x:Name="Indeterminate"/>
+                            </VisualStateGroup>
+                        </VisualStateManager.VisualStateGroups>
+                        <Border x:Name="SelectedBackground" Background="{ThemeResource SubtleFillColorSecondaryBrush}" Opacity="0"/>
+                        <Border x:Name="HoverBackground" Background="Transparent"/>
+                        <Border x:Name="SelectionPill" Width="3" Height="16" CornerRadius="1.5" HorizontalAlignment="Left" VerticalAlignment="Center" Background="{ThemeResource AccentFillColorDefaultBrush}" Opacity="0"/>
+                        <ContentPresenter x:Name="ContentPresenter" Content="{TemplateBinding Content}" Foreground="{TemplateBinding Foreground}" Margin="16,0,12,0" HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+    <Style x:Key="FooterStyle" TargetType="Border">
+        <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}"/>
+        <Setter Property="BorderThickness" Value="0,1,0,0"/>
+        <Setter Property="Padding" Value="24,12"/>
+    </Style>
+    <Style x:Key="IconPreviewStyle" TargetType="Border">
+        <Setter Property="Background" Value="{ThemeResource SubtleFillColorSecondaryBrush}"/>
+        <Setter Property="CornerRadius" Value="{ThemeResource ControlCornerRadius}"/>
+    </Style>
+    <Style x:Key="RootStyle" TargetType="Grid">
+        <Setter Property="Background" Value="{ThemeResource SolidBackgroundFillColorBaseBrush}"/>
+    </Style>
+</ResourceDictionary>)";
+
+    try {
+        m_resources =
+            mux::Markup::XamlReader::Load(xaml).as<mux::ResourceDictionary>();
+    } catch (...) {
+        Wh_Log(L"Loading the styles failed: %08X", winrt::to_hresult().value);
+        m_resources = nullptr;
+    }
+
+    m_cardStyle = FindStyle(L"CardStyle");
+    m_secondaryTextStyle = FindStyle(L"SecondaryTextStyle");
+    m_sectionHeaderStyle = FindStyle(L"SectionHeaderStyle");
+    m_pageTitleStyle = FindStyle(L"PageTitleStyle");
+}
+
+mux::Style SettingsWindow::FindStyle(PCWSTR key) {
+    auto boxedKey = BoxString(key);
+    try {
+        if (m_resources) {
+            if (auto value = m_resources.TryLookup(boxedKey))
+                return value.try_as<mux::Style>();
+        }
+        if (auto app = mux::Application::Current()) {
+            if (auto value = app.Resources().TryLookup(boxedKey))
+                return value.try_as<mux::Style>();
+        }
+    } catch (...) {
+    }
+    return nullptr;
+}
+
+void SettingsWindow::ApplyTheme() {
+    bool dark = IsSystemDarkModeActive();
+    BOOL useDarkMode = dark;
+    DwmSetWindowAttribute(m_hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */,
+                          &useDarkMode, sizeof(useDarkMode));
+    // SolidBackgroundFillColorBase of the dark and light themes.
+    COLORREF captionColor = dark ? RGB(0x20, 0x20, 0x20) : RGB(0xF3, 0xF3, 0xF3);
+    DwmSetWindowAttribute(m_hwnd, 35 /* DWMWA_CAPTION_COLOR */, &captionColor,
+                          sizeof(captionColor));
+    auto theme = dark ? mux::ElementTheme::Dark : mux::ElementTheme::Light;
+    if (m_root)
+        m_root.RequestedTheme(theme);
+    if (m_dialog)
+        m_dialog.RequestedTheme(theme);
+    RebuildPreview();
+}
+
+mux::UIElement SettingsWindow::BuildRoot() {
+    LoadStyles();
+
+    m_root = muxc::Grid();
+    if (m_resources)
+        m_root.Resources(m_resources);
+    if (auto style = FindStyle(L"RootStyle"))
+        m_root.Style(style);
+
+    // A navigation pane drawn the way the WinUI 3 NavigationView draws its
+    // left pane: 36px items with a subtle fill on hover and selection, and an
+    // accent pill for the selected one.
+    AddGridColumn(m_root, PixelLength(280));
+    AddGridColumn(m_root, StarLength());
+
+    muxc::Grid pane;
+    AddGridRow(pane, AutoLength());
+    AddGridRow(pane, StarLength());
+    AddGridRow(pane, AutoLength());
+    m_root.Children().Append(pane);
+
+    muxc::TextBlock appTitle;
+    appTitle.Text(L"Explorer Command Bar");
+    appTitle.FontSize(20);
+    appTitle.FontWeight(winrt::Windows::UI::Text::FontWeight{600});
+    appTitle.TextWrapping(mux::TextWrapping::Wrap);
+    appTitle.Margin({20, 20, 16, 16});
+    pane.Children().Append(appTitle);
+
+    // An inline Hyperlink crashes File Explorer's XAML when clicked, so the
+    // link is a HyperlinkButton next to the text.
+    muxc::StackPanel credit;
+    credit.Orientation(muxc::Orientation::Horizontal);
+    credit.Margin({20, 12, 16, 16});
+    auto creditText = MakeText(L"", m_secondaryTextStyle);
+    creditText.VerticalAlignment(mux::VerticalAlignment::Center);
+    auto creditInlines = creditText.Inlines();
+    muxd::Run createdWith;
+#ifdef WH_MOD_VERSION
+    createdWith.Text(L"v" WH_MOD_VERSION L" | Created with ");
+#else
+    createdWith.Text(L"Created with ");
+#endif
+    creditInlines.Append(createdWith);
+    muxd::Run heart;
+    heart.Text(L"\u2665");
+    heart.Foreground(muxm::SolidColorBrush(
+        winrt::Windows::UI::ColorHelper::FromArgb(255, 0xF0, 0x4A, 0x5E)));
+    creditInlines.Append(heart);
+    muxd::Run by;
+    by.Text(L" by\u00a0");
+    creditInlines.Append(by);
+    credit.Children().Append(creditText);
+
+    muxc::HyperlinkButton authorLink;
+    muxc::TextBlock authorName;
+    authorName.Text(L"DanRotaru");
+    authorName.FontSize(12);
+    authorName.TextDecorations(
+        winrt::Windows::UI::Text::TextDecorations::Underline);
+    authorLink.Content(authorName);
+    authorLink.Padding({0, 0, 0, 0});
+    authorLink.MinHeight(0);
+    authorLink.VerticalAlignment(mux::VerticalAlignment::Center);
+    muxc::ToolTipService::SetToolTip(authorLink, BoxString(L"dan13.me"));
+    authorLink.Click([](wf::IInspectable const&, mux::RoutedEventArgs const&) {
+        OpenUrl(L"https://dan13.me/?utm_source=explorer-command-bar");
+    });
+    credit.Children().Append(authorLink);
+    muxc::Grid::SetRow(credit, 2);
+    pane.Children().Append(credit);
+
+    muxc::StackPanel navItems;
+    navItems.Margin({0, 0, 0, 8});
+    muxc::ScrollViewer navScroller;
+    navScroller.VerticalScrollBarVisibility(muxc::ScrollBarVisibility::Auto);
+    navScroller.Content(navItems);
+    muxc::Grid::SetRow(navScroller, 1);
+    pane.Children().Append(navScroller);
+
+    auto navItemStyle = FindStyle(L"NavItemStyle");
+    muxc::RadioButton firstItem{nullptr};
+    auto addNavItem = [this, &navItems, &navItemStyle, &firstItem](
+                          std::wstring const& tag, std::wstring const& title,
+                          PCWSTR glyph) {
+        muxc::StackPanel itemContent;
+        itemContent.Orientation(muxc::Orientation::Horizontal);
+        itemContent.Spacing(16);
+        auto icon = MakeGlyph(glyph, 16);
+        icon.VerticalAlignment(mux::VerticalAlignment::Center);
+        itemContent.Children().Append(icon);
+        muxc::TextBlock text;
+        text.Text(title);
+        text.FontSize(14);
+        text.VerticalAlignment(mux::VerticalAlignment::Center);
+        itemContent.Children().Append(text);
+
+        muxc::RadioButton navItem;
+        if (navItemStyle)
+            navItem.Style(navItemStyle);
+        navItem.GroupName(L"SettingsNavigation");
+        navItem.Content(itemContent);
+        mux::Automation::AutomationProperties::SetName(navItem, title);
+        navItem.Checked([this, tag](wf::IInspectable const&,
+                                    mux::RoutedEventArgs const&) {
+            if (tag != m_currentPage)
+                ShowPage(tag);
+        });
+        navItems.Children().Append(navItem);
+        m_navButtons.push_back({tag, navItem});
+        if (!firstItem)
+            firstItem = navItem;
+    };
+    addNavItem(L"items", L"Toolbar items", L"\uE71D");
+    for (auto const& page : DescribeSettingsPages(m_model))
+        addNavItem(page.tag, page.title, page.glyph);
+
+    muxc::Grid content;
+    AddGridRow(content, StarLength());
+    AddGridRow(content, AutoLength());
+    AddGridRow(content, AutoLength());
+
+    m_pageHost = muxc::Grid();
+    content.Children().Append(m_pageHost);
+
+    m_infoBar = muxc::InfoBar();
+    m_infoBar.IsOpen(false);
+    m_infoBar.Margin({24, 0, 24, 12});
+    muxc::Grid::SetRow(m_infoBar, 1);
+    content.Children().Append(m_infoBar);
+
+    muxc::Border footer;
+    if (auto style = FindStyle(L"FooterStyle"))
+        footer.Style(style);
+    else
+        footer.Padding({24, 12, 24, 12});
+    muxc::Grid::SetRow(footer, 2);
+
+    muxc::Grid footerGrid;
+    footerGrid.ColumnSpacing(12);
+    AddGridColumn(footerGrid, StarLength());
+    AddGridColumn(footerGrid, AutoLength());
+    AddGridColumn(footerGrid, AutoLength());
+    AddGridColumn(footerGrid, AutoLength());
+
+    m_statusText = MakeText(L"", m_secondaryTextStyle);
+    m_statusText.VerticalAlignment(mux::VerticalAlignment::Center);
+    footerGrid.Children().Append(m_statusText);
+
+    m_savingRing = muxc::ProgressRing();
+    m_savingRing.Width(20);
+    m_savingRing.Height(20);
+    m_savingRing.IsActive(false);
+    muxc::Grid::SetColumn(m_savingRing, 1);
+    footerGrid.Children().Append(m_savingRing);
+
+    m_discardButton = MakeTextButton(L"Discard changes");
+    m_discardButton.Click([this](wf::IInspectable const&,
+                                 mux::RoutedEventArgs const&) { Discard(); });
+    muxc::Grid::SetColumn(m_discardButton, 2);
+    footerGrid.Children().Append(m_discardButton);
+
+    m_saveButton = MakeTextButton(L"Save");
+    m_saveButton.MinWidth(120);
+    if (auto style = FindStyle(L"AccentButtonStyle"))
+        m_saveButton.Style(style);
+    m_saveButton.Click([this](wf::IInspectable const&,
+                              mux::RoutedEventArgs const&) { Save(false); });
+    muxc::ToolTipService::SetToolTip(m_saveButton, BoxString(L"Ctrl+S"));
+    muxc::Grid::SetColumn(m_saveButton, 3);
+    footerGrid.Children().Append(m_saveButton);
+
+    footer.Child(footerGrid);
+    content.Children().Append(footer);
+
+    muxc::Border contentArea;
+    if (auto style = FindStyle(L"ContentAreaStyle"))
+        contentArea.Style(style);
+    contentArea.Child(content);
+    muxc::Grid::SetColumn(contentArea, 1);
+    m_root.Children().Append(contentArea);
+
+    mux::Input::KeyboardAccelerator saveAccelerator;
+    saveAccelerator.Key(winrt::Windows::System::VirtualKey::S);
+    saveAccelerator.Modifiers(
+        winrt::Windows::System::VirtualKeyModifiers::Control);
+    saveAccelerator.Invoked(
+        [this](mux::Input::KeyboardAccelerator const&,
+               mux::Input::KeyboardAcceleratorInvokedEventArgs const& args) {
+            args.Handled(true);
+            if (m_dirty)
+                Save(false);
+        });
+    m_root.KeyboardAccelerators().Append(saveAccelerator);
+    // Otherwise the root shows a "Ctrl+S" tooltip wherever the pointer
+    // rests. The Save button has the tooltip instead.
+    m_root.KeyboardAcceleratorPlacementMode(
+        mux::Input::KeyboardAcceleratorPlacementMode::Hidden);
+
+    ApplyTheme();
+    firstItem.IsChecked(true);
+    if (m_currentPage.empty())
+        ShowPage(L"items");
+    UpdateFooter();
+    return m_root;
+}
+
+void SettingsWindow::ShowPage(std::wstring const& tag) {
+    m_currentPage = tag;
+    m_previewHost = nullptr;
+    m_previewItems.clear();
+    m_previewBuiltIns.clear();
+    m_selectedBuiltIn = -1;
+    m_editorPanel = nullptr;
+    m_editorIconPreview = nullptr;
+    m_moveUpButton = nullptr;
+    m_moveDownButton = nullptr;
+    m_duplicateButton = nullptr;
+    m_deleteButton = nullptr;
+    m_addEntryItem = nullptr;
+    m_addSubmenuItem = nullptr;
+    m_editorGeneration++;
+
+    auto children = m_pageHost.Children();
+    children.Clear();
+
+    if (tag == L"items") {
+        children.Append(BuildItemsPage());
+        RefreshItemsPage();
+        return;
+    }
+
+    for (auto const& page : DescribeSettingsPages(m_model)) {
+        if (page.tag == tag) {
+            children.Append(BuildSettingsPage(page));
+            return;
+        }
+    }
+}
+
+muxc::TextBlock SettingsWindow::MakeText(std::wstring const& text,
+                                         mux::Style const& style) {
+    muxc::TextBlock textBlock;
+    if (style)
+        textBlock.Style(style);
+    textBlock.Text(text);
+    return textBlock;
+}
+
+muxc::StackPanel SettingsWindow::MakePageHeader(
+    std::wstring const& title,
+    std::wstring const& description) {
+    muxc::StackPanel header;
+    header.Spacing(4);
+    auto titleText = MakeText(title, m_pageTitleStyle);
+    if (!m_pageTitleStyle) {
+        titleText.FontSize(28);
+        titleText.FontWeight(winrt::Windows::UI::Text::FontWeight{600});
+    }
+    header.Children().Append(titleText);
+    if (!description.empty()) {
+        auto descriptionText = MakeText(description, m_secondaryTextStyle);
+        descriptionText.FontSize(14);
+        descriptionText.TextWrapping(mux::TextWrapping::Wrap);
+        header.Children().Append(descriptionText);
+    }
+    return header;
+}
+
+muxc::Border SettingsWindow::MakeCard(PCWSTR glyph,
+                                      std::wstring const& title,
+                                      std::wstring const& description,
+                                      mux::FrameworkElement const& control,
+                                      bool wide) {
+    muxc::Border card;
+    if (m_cardStyle) {
+        card.Style(m_cardStyle);
+    } else {
+        card.Padding({16, 12, 16, 12});
+        card.Margin({0, 0, 0, 4});
+    }
+
+    muxc::Grid grid;
+    grid.ColumnSpacing(16);
+    int textColumn = 0;
+    if (glyph) {
+        AddGridColumn(grid, AutoLength());
+        auto icon = MakeGlyph(glyph, 20);
+        icon.VerticalAlignment(mux::VerticalAlignment::Center);
+        grid.Children().Append(icon);
+        textColumn = 1;
+    }
+    AddGridColumn(grid, StarLength());
+    AddGridColumn(grid, AutoLength());
+
+    muxc::StackPanel text;
+    text.VerticalAlignment(mux::VerticalAlignment::Center);
+    muxc::TextBlock titleText;
+    titleText.Text(title);
+    titleText.TextWrapping(mux::TextWrapping::Wrap);
+    text.Children().Append(titleText);
+    if (!description.empty())
+        text.Children().Append(MakeText(description, m_secondaryTextStyle));
+    muxc::Grid::SetColumn(text, textColumn);
+    grid.Children().Append(text);
+
+    if (control) {
+        if (wide) {
+            AddGridRow(grid, AutoLength());
+            AddGridRow(grid, AutoLength());
+            control.Margin({0, 10, 0, 2});
+            control.HorizontalAlignment(mux::HorizontalAlignment::Stretch);
+            muxc::Grid::SetRow(control, 1);
+            muxc::Grid::SetColumn(control, textColumn);
+            muxc::Grid::SetColumnSpan(control, 2);
+        } else {
+            control.VerticalAlignment(mux::VerticalAlignment::Center);
+            muxc::Grid::SetColumn(control, textColumn + 1);
+        }
+        grid.Children().Append(control);
+    }
+
+    card.Child(grid);
+    return card;
+}
+
+mux::FrameworkElement SettingsWindow::MakeFieldControl(
+    SettingField const& field) {
+    switch (field.kind) {
+        case SettingKind::Bool: {
+            auto* value = (bool*)field.value;
+            bool inverted = field.inverted;
+            muxc::ToggleSwitch toggle;
+            toggle.IsOn(inverted ? !*value : *value);
+            toggle.MinWidth(0);
+            toggle.Toggled([this, value, inverted](
+                               wf::IInspectable const& sender,
+                               mux::RoutedEventArgs const&) {
+                bool isOn = sender.as<muxc::ToggleSwitch>().IsOn();
+                *value = inverted ? !isOn : isOn;
+                OnModelChanged();
+            });
+            return toggle;
+        }
+
+        case SettingKind::Int: {
+            auto* value = (int*)field.value;
+            int minimum = field.minimum;
+            muxc::NumberBox numberBox;
+            numberBox.Minimum(minimum);
+            numberBox.Value(*value);
+            numberBox.SmallChange(1);
+            numberBox.LargeChange(10);
+            numberBox.Width(170);
+            numberBox.SpinButtonPlacementMode(
+                muxc::NumberBoxSpinButtonPlacementMode::Compact);
+            numberBox.ValueChanged(
+                [this, value, minimum](
+                    muxc::NumberBox const& sender,
+                    muxc::NumberBoxValueChangedEventArgs const& args) {
+                    double newValue = args.NewValue();
+                    if (std::isnan(newValue)) {
+                        sender.Value(*value);
+                        return;
+                    }
+                    *value = std::max(minimum, (int)std::lround(newValue));
+                    OnModelChanged();
+                });
+            return numberBox;
+        }
+
+        case SettingKind::String: {
+            auto* value = (std::wstring*)field.value;
+            auto textBox = MakeTextBox(*value, nullptr);
+            if (!field.wide)
+                textBox.Width(280);
+            textBox.TextChanged([this, value](
+                                    wf::IInspectable const& sender,
+                                    muxc::TextChangedEventArgs const&) {
+                *value = std::wstring(sender.as<muxc::TextBox>().Text());
+                OnModelChanged();
+            });
+            return textBox;
+        }
+
+        case SettingKind::Header:
+            break;
+    }
+    return nullptr;
+}
+
+mux::FrameworkElement SettingsWindow::BuildSettingsPage(
+    SettingsPageDef const& page) {
+    muxc::StackPanel panel;
+    panel.Margin({36, 24, 36, 36});
+    panel.MaxWidth(1000);
+    panel.Children().Append(MakePageHeader(page.title, page.description));
+
+    bool first = true;
+    for (auto const& field : page.fields) {
+        if (field.kind == SettingKind::Header) {
+            auto header = MakeText(field.title, m_sectionHeaderStyle);
+            if (!m_sectionHeaderStyle) {
+                header.FontWeight(winrt::Windows::UI::Text::FontWeight{600});
+                header.Margin({1, 28, 0, 8});
+            }
+            panel.Children().Append(header);
+        } else {
+            auto card = MakeCard(field.glyph, field.title, field.description,
+                                 MakeFieldControl(field), field.wide);
+            if (first)
+                card.Margin({0, 24, 0, 4});
+            panel.Children().Append(card);
+        }
+        first = false;
+    }
+
+    muxc::ScrollViewer scroller;
+    scroller.VerticalScrollBarVisibility(muxc::ScrollBarVisibility::Auto);
+    scroller.Content(panel);
+    return scroller;
+}
+
+// Ids of the built-in elements in the command bar preview, besides the
+// kDefaultButtons indexes.
+constexpr int kPreviewSeeMoreId = kDefaultButtonCount;
+constexpr int kPreviewDetailsId = kDefaultButtonCount + 1;
+
+std::wstring BuiltInButtonName(int id) {
+    std::lock_guard<std::mutex> lock(g_defaultButtonLooksMutex);
+    if (id == kPreviewSeeMoreId)
+        return L"See more";
+    if (id == kPreviewDetailsId) {
+        return g_detailsButtonLook.label.empty() ? L"Details"
+                                                 : g_detailsButtonLook.label;
+    }
+    return g_defaultButtonLooks[id].label.empty()
+               ? std::wstring(kDefaultButtonTitles[id])
+               : g_defaultButtonLooks[id].label;
+}
+
+// Like AddNewPlusChevron, for any command bar button with a visible label.
+void AddLabelChevron(mux::FrameworkElement const& button,
+                     std::wstring const& label) try {
+    auto textLabel =
+        FindDescendantByName(button, L"TextLabel").try_as<muxc::TextBlock>();
+    if (!textLabel)
+        return;
+    std::wstring currentText = textLabel.Text().c_str();
+    if (!currentText.empty() && currentText.back() == L'')
+        return;
+
+    auto inlines = textLabel.Inlines();
+    inlines.Clear();
+    muxd::Run text;
+    text.Text(label + L"  ");
+    inlines.Append(text);
+    muxd::Run chevron;
+    chevron.Text(L"");
+    chevron.FontFamily(muxm::FontFamily(L"Segoe Fluent Icons"));
+    chevron.FontSize(8);
+    inlines.Append(chevron);
+} catch (...) {
+    Wh_Log(L"Error %08X", winrt::to_hresult().value);
+}
+
+// The default checked look is a solid accent fill meant for glyphs which turn
+// white, which leaves File Explorer's colored icons hard to see. Selected
+// buttons get the subtle fill WinUI uses for selected list and navigation
+// items instead, outlined with the accent color.
+void ApplyPreviewSelectionStyle(muxc::AppBarToggleButton const& button) {
+    using winrt::Windows::UI::ColorHelper;
+    namespace wuvm = winrt::Windows::UI::ViewManagement;
+    bool dark = IsSystemDarkModeActive();
+    auto subtle = [dark](uint8_t darkAlpha, uint8_t lightAlpha) {
+        return muxm::SolidColorBrush(
+            dark ? ColorHelper::FromArgb(darkAlpha, 0xFF, 0xFF, 0xFF)
+                 : ColorHelper::FromArgb(lightAlpha, 0x00, 0x00, 0x00));
+    };
+    winrt::Windows::UI::Color accent =
+        dark ? ColorHelper::FromArgb(0xFF, 0x99, 0xEB, 0xFF)
+             : ColorHelper::FromArgb(0xFF, 0x00, 0x5F, 0xB8);
+    try {
+        accent = wuvm::UISettings().GetColorValue(
+            dark ? wuvm::UIColorType::AccentLight2
+                 : wuvm::UIColorType::AccentDark1);
+    } catch (...) {
+    }
+    muxm::SolidColorBrush accentBrush(accent);
+    muxm::SolidColorBrush text(dark
+                                   ? ColorHelper::FromArgb(0xFF, 0xFF, 0xFF, 0xFF)
+                                   : ColorHelper::FromArgb(0xE4, 0, 0, 0));
+
+    auto resources = button.Resources();
+    auto set = [&resources](PCWSTR key, wf::IInspectable const& value) {
+        resources.Insert(BoxString(key), value);
+    };
+    set(L"AppBarToggleButtonBackgroundChecked", subtle(0x15, 0x0F));
+    set(L"AppBarToggleButtonBackgroundCheckedPointerOver", subtle(0x1F, 0x18));
+    set(L"AppBarToggleButtonBackgroundCheckedPressed", subtle(0x0B, 0x09));
+    set(L"AppBarToggleButtonBorderBrushChecked", accentBrush);
+    set(L"AppBarToggleButtonBorderBrushCheckedPointerOver", accentBrush);
+    set(L"AppBarToggleButtonBorderBrushCheckedPressed", accentBrush);
+    set(L"AppBarToggleButtonForegroundChecked", text);
+    set(L"AppBarToggleButtonForegroundCheckedPointerOver", text);
+    set(L"AppBarToggleButtonForegroundCheckedPressed", text);
+    button.BorderThickness({1, 1, 1, 1});
+}
+
+// Icon-only buttons are as narrow as File Explorer's own, instead of the
+// 68px a command bar button takes by default.
+void MakeCompactPreviewButton(mux::FrameworkElement const& button) {
+    button.MinWidth(0);
+    button.Width(44);
+}
+
+// The command bars sit on a card, so they don't draw a background of their
+// own, and their buttons get rounded corners like File Explorer's.
+void StyleCardCommandBar(muxc::CommandBar const& bar) {
+    bar.Background(muxm::SolidColorBrush(
+        winrt::Windows::UI::ColorHelper::FromArgb(0, 0, 0, 0)));
+    bar.BorderThickness({0, 0, 0, 0});
+    for (auto const& command : bar.PrimaryCommands()) {
+        if (auto control = command.try_as<muxc::Control>();
+            control && !command.try_as<muxc::AppBarSeparator>()) {
+            control.CornerRadius({4, 4, 4, 4});
+        }
+    }
+}
+
+mux::FrameworkElement SettingsWindow::BuildItemsPage() {
+    muxc::Grid page;
+    page.Margin({36, 24, 36, 0});
+    AddGridRow(page, AutoLength());
+    AddGridRow(page, AutoLength());
+    AddGridRow(page, AutoLength());
+    AddGridRow(page, StarLength());
+    page.Children().Append(MakePageHeader(
+        L"Toolbar items",
+        L"This is the File Explorer command bar with your settings. Click an "
+        L"item to edit it, or open a menu to pick one of its entries. Hidden "
+        L"built-in buttons can be shown again on the Built-in buttons page."));
+
+    m_previewHost = muxc::Border();
+    if (m_cardStyle)
+        m_previewHost.Style(m_cardStyle);
+    m_previewHost.Padding({4, 4, 4, 4});
+    m_previewHost.MinHeight(0);
+    m_previewHost.Margin({0, 20, 0, 0});
+    muxc::Grid::SetRow(m_previewHost, 1);
+    page.Children().Append(m_previewHost);
+
+    auto toolbar = BuildItemToolbar();
+    StyleCardCommandBar(toolbar);
+    muxc::Border toolbarCard;
+    if (m_cardStyle)
+        toolbarCard.Style(m_cardStyle);
+    toolbarCard.Padding({4, 4, 4, 4});
+    toolbarCard.MinHeight(0);
+    toolbarCard.Margin({0, 8, 0, 4});
+    toolbarCard.HorizontalAlignment(mux::HorizontalAlignment::Left);
+    toolbarCard.Child(toolbar);
+    muxc::Grid::SetRow(toolbarCard, 2);
+    page.Children().Append(toolbarCard);
+
+    muxc::ScrollViewer editorScroller;
+    editorScroller.VerticalScrollBarVisibility(muxc::ScrollBarVisibility::Auto);
+    m_editorPanel = muxc::StackPanel();
+    m_editorPanel.Padding({0, 8, 16, 24});
+    editorScroller.Content(m_editorPanel);
+    muxc::Grid::SetRow(editorScroller, 3);
+    page.Children().Append(editorScroller);
+
+    return page;
+}
+
+muxc::CommandBar SettingsWindow::BuildItemToolbar() {
+    muxc::CommandBar bar;
+    bar.DefaultLabelPosition(muxc::CommandBarDefaultLabelPosition::Right);
+    bar.OverflowButtonVisibility(
+        muxc::CommandBarOverflowButtonVisibility::Collapsed);
+    bar.HorizontalAlignment(mux::HorizontalAlignment::Left);
+
+    muxc::MenuFlyout addMenu;
+    addMenu.Placement(
+        muxc::Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
+    auto addMenuItem = [&addMenu](PCWSTR text, PCWSTR glyph,
+                                  std::function<void()> action) {
+        muxc::MenuFlyoutItem item;
+        item.Text(text);
+        item.Icon(CreateGlyphIcon(glyph));
+        item.Click([action](wf::IInspectable const&,
+                            mux::RoutedEventArgs const&) { action(); });
+        addMenu.Items().Append(item);
+        return item;
+    };
+    addMenuItem(L"Toolbar button", L"",
+                [this]() { AddTopLevelItem(false); });
+    addMenuItem(L"Dropdown menu", L"",
+                [this]() { AddTopLevelItem(true); });
+    addMenu.Items().Append(muxc::MenuFlyoutSeparator());
+    m_addEntryItem = addMenuItem(L"Menu entry", L"",
+                                 [this]() { AddMenuEntry(false); });
+    m_addSubmenuItem =
+        addMenuItem(L"Submenu", L"", [this]() { AddMenuEntry(true); });
+
+    muxc::AppBarButton addButton;
+    addButton.Label(L"Add");
+    addButton.Icon(CreateGlyphIcon(L""));
+    addButton.Flyout(addMenu);
+    bar.PrimaryCommands().Append(addButton);
+    bar.PrimaryCommands().Append(muxc::AppBarSeparator());
+
+    auto makeButton = [&bar](PCWSTR label, PCWSTR glyph,
+                             std::function<void()> action) {
+        muxc::AppBarButton button;
+        button.Label(label);
+        button.Icon(CreateGlyphIcon(glyph));
+        button.Click([action](wf::IInspectable const&,
+                              mux::RoutedEventArgs const&) { action(); });
+        bar.PrimaryCommands().Append(button);
+        return button;
+    };
+    m_moveUpButton = makeButton(L"Move left", L"",
+                                [this]() { MoveSelectedItem(-1); });
+    m_moveDownButton = makeButton(L"Move right", L"",
+                                  [this]() { MoveSelectedItem(1); });
+    m_duplicateButton = makeButton(L"Duplicate", L"",
+                                   [this]() { DuplicateSelectedItem(); });
+    m_deleteButton =
+        makeButton(L"Delete", L"", [this]() { DeleteSelectedItem(); });
+
+    return bar;
+}
+
+std::vector<ActionItem>* SettingsWindow::SiblingsOf(
+    std::vector<int> const& path) {
+    std::vector<ActionItem>* list = &m_model.items;
+    for (size_t i = 0; i + 1 < path.size(); i++) {
+        if (path[i] < 0 || path[i] >= (int)list->size())
+            return nullptr;
+        list = &(*list)[path[i]].subItems;
+    }
+    return list;
+}
+
+std::vector<ActionItem>* SettingsWindow::ChildrenOf(
+    std::vector<int> const& path) {
+    if (path.empty())
+        return &m_model.items;
+    ActionItem* item = ItemAt(path);
+    return item ? &item->subItems : nullptr;
+}
+
+ActionItem* SettingsWindow::ItemAt(std::vector<int> const& path) {
+    if (path.empty())
+        return nullptr;
+    auto* siblings = SiblingsOf(path);
+    if (!siblings || path.back() < 0 || path.back() >= (int)siblings->size())
+        return nullptr;
+    return &(*siblings)[path.back()];
+}
+
+ActionItem* SettingsWindow::EditedItem(std::vector<int> const& path,
+                                       int generation) {
+    return generation == m_editorGeneration ? ItemAt(path) : nullptr;
+}
+
+void SettingsWindow::RefreshItemsPage() {
+    if (!m_previewHost)
+        return;
+    if (!ItemAt(m_selectedPath))
+        m_selectedPath.clear();
+    if (!m_selectedPath.empty())
+        m_selectedBuiltIn = -1;
+    RebuildPreview();
+    BuildItemEditor();
+    UpdateItemToolbar();
+}
+
+muxc::AppBarButton SettingsWindow::MakePreviewButton(
+    muxc::IconElement const& icon,
+    std::wstring const& label,
+    bool showLabel,
+    bool chevron,
+    std::wstring const& pageTag) {
+    muxc::AppBarButton button;
+    button.Label(label);
+    button.Icon(icon);
+    button.LabelPosition(showLabel ? muxc::CommandBarLabelPosition::Default
+                                   : muxc::CommandBarLabelPosition::Collapsed);
+    if (!showLabel)
+        MakeCompactPreviewButton(button);
+    muxc::ToolTipService::SetToolTip(button, BoxString(label));
+    if (showLabel && chevron) {
+        button.Loaded([](wf::IInspectable const& sender,
+                         mux::RoutedEventArgs const&) {
+            if (auto button = sender.try_as<muxc::AppBarButton>())
+                AddNewPlusChevron(button);
+        });
+    }
+    button.Click([this, pageTag](wf::IInspectable const&,
+                                 mux::RoutedEventArgs const&) {
+        NavigateTo(pageTag);
+    });
+    return button;
+}
+
+void SettingsWindow::AppendPreviewMenuEntries(
+    std::vector<ActionItem> const& items,
+    std::vector<int> const& parentPath,
+    wfc::IVector<muxc::MenuFlyoutItemBase> const& target) {
+    for (int i = 0; i < (int)items.size(); i++) {
+        auto const& entry = items[i];
+        if (IsEmptyActionItem(entry))
+            continue;
+        std::vector<int> path = parentPath;
+        path.push_back(i);
+        int depth = (int)path.size() - 1;
+        std::wstring name = entry.name.empty() ? L"Untitled" : entry.name;
+
+        muxc::IconElement icon{nullptr};
+        if (!entry.hideIcon)
+            icon = TryCreateIconElement(entry.icon, entry.command);
+
+        if (entry.isMenu && depth < kMaxMenuDepth && !entry.subItems.empty()) {
+            muxc::MenuFlyoutSubItem subMenu;
+            subMenu.Text(name);
+            if (icon)
+                subMenu.Icon(icon);
+            muxc::MenuFlyoutItem editItem;
+            editItem.Text(L"Edit “" + name + L"”");
+            editItem.Icon(CreateGlyphIcon(L""));
+            editItem.Click([this, path](wf::IInspectable const&,
+                                        mux::RoutedEventArgs const&) {
+                SelectItem(path);
+            });
+            subMenu.Items().Append(editItem);
+            subMenu.Items().Append(muxc::MenuFlyoutSeparator());
+            AppendPreviewMenuEntries(entry.subItems, path, subMenu.Items());
+            target.Append(subMenu);
+        } else {
+            muxc::MenuFlyoutItem menuItem;
+            menuItem.Text(name);
+            if (icon)
+                menuItem.Icon(icon);
+            menuItem.Click([this, path](wf::IInspectable const&,
+                                        mux::RoutedEventArgs const&) {
+                SelectItem(path);
+            });
+            target.Append(menuItem);
+        }
+
+        if (entry.separatorAfter)
+            target.Append(muxc::MenuFlyoutSeparator());
+    }
+}
+
+muxc::AppBarToggleButton SettingsWindow::MakePreviewItem(
+    ActionItem const& item,
+    int index) {
+    muxc::AppBarToggleButton button;
+    ApplyPreviewSelectionStyle(button);
+    button.Label(item.labelText.empty() ? item.name : item.labelText);
+    if (auto icon = MakeCommandButtonIcon(item))
+        button.Icon(icon);
+    button.LabelPosition(item.showLabel
+                             ? muxc::CommandBarLabelPosition::Default
+                             : muxc::CommandBarLabelPosition::Collapsed);
+    if (!item.showLabel)
+        MakeCompactPreviewButton(button);
+    muxc::ToolTipService::SetToolTip(
+        button, BoxString(item.name.empty() ? L"Untitled" : item.name));
+
+    bool isMenu = item.isMenu && !item.subItems.empty();
+    if (isMenu) {
+        muxc::MenuFlyout menu;
+        menu.Placement(
+            muxc::Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
+        AppendPreviewMenuEntries(item.subItems, {index}, menu.Items());
+        muxc::Primitives::FlyoutBase::SetAttachedFlyout(button, menu);
+    }
+
+    button.Click([this, index, isMenu](wf::IInspectable const& sender,
+                                       mux::RoutedEventArgs const&) {
+        SelectItem({index});
+        if (isMenu) {
+            if (auto element = sender.try_as<mux::FrameworkElement>())
+                muxc::Primitives::FlyoutBase::ShowAttachedFlyout(element);
+        }
+    });
+    return button;
+}
+
+void SettingsWindow::RebuildPreview() {
+    if (!m_previewHost)
+        return;
+
+    DefaultButtonLook looks[kDefaultButtonCount];
+    DefaultButtonLook detailsLook;
+    {
+        std::lock_guard<std::mutex> lock(g_defaultButtonLooksMutex);
+        for (int i = 0; i < kDefaultButtonCount; i++)
+            looks[i] = g_defaultButtonLooks[i];
+        detailsLook = g_detailsButtonLook;
+    }
+
+    auto svgOrGlyphIcon = [](std::wstring const& uri,
+                             PCWSTR glyph) -> muxc::IconElement {
+        if (!uri.empty()) {
+            try {
+                muxm::Imaging::SvgImageSource source(
+                    wf::Uri(winrt::hstring{uri}));
+                muxc::ImageIcon icon;
+                icon.Source(source);
+                return icon;
+            } catch (...) {
+                Wh_Log(L"Error %08X", winrt::to_hresult().value);
+            }
+        }
+        return CreateGlyphIcon(glyph);
+    };
+    auto builtInIcon = [&](int index) {
+        return svgOrGlyphIcon(looks[index].iconUri, kDefaultButtonGlyphs[index]);
+    };
+    auto builtInLabel = [&](int index) {
+        return looks[index].label.empty()
+                   ? std::wstring(kDefaultButtonTitles[index])
+                   : looks[index].label;
+    };
+    auto configureBar = [](muxc::CommandBar const& bar) {
+        bar.DefaultLabelPosition(muxc::CommandBarDefaultLabelPosition::Right);
+        bar.IsDynamicOverflowEnabled(false);
+        bar.OverflowButtonVisibility(
+            muxc::CommandBarOverflowButtonVisibility::Collapsed);
+        bar.VerticalAlignment(mux::VerticalAlignment::Center);
+    };
+
+    auto const& s = m_model;
+    muxc::CommandBar primary;
+    configureBar(primary);
+    primary.HorizontalAlignment(mux::HorizontalAlignment::Left);
+    muxc::CommandBar secondary;
+    configureBar(secondary);
+    secondary.HorizontalAlignment(mux::HorizontalAlignment::Right);
+    auto primaryCommands = primary.PrimaryCommands();
+    auto secondaryCommands = secondary.PrimaryCommands();
+
+    if (s.newPlus.enabled) {
+        bool showLabel = s.newPlus.showLabel && !s.newPlus.buttonLabel.empty();
+        auto icon = s.newPlus.buttonIcon.empty()
+                        ? builtInIcon(kNewButtonIndex)
+                        : CreateIconElement(s.newPlus.buttonIcon,
+                                            std::wstring(), L"");
+        primaryCommands.Append(MakePreviewButton(
+            icon,
+            s.newPlus.buttonLabel.empty() ? L"New+" : s.newPlus.buttonLabel,
+            showLabel, true, L"newPlus"));
+    }
+
+    m_previewBuiltIns.clear();
+    auto appendBuiltIn = [&](int id, bool showLabel, bool chevron) {
+        if (*BuiltInHiddenField(id))
+            return;
+        primaryCommands.Append(MakePreviewBuiltIn(
+            id, builtInIcon(id), builtInLabel(id), showLabel, chevron));
+    };
+    if (!s.newPlus.enabled || s.newPlus.keepOriginalNewButton)
+        appendBuiltIn(kNewButtonIndex, true, true);
+    if (!s.hideSeparatorAfterNew)
+        primaryCommands.Append(muxc::AppBarSeparator());
+    for (int i = kNewButtonIndex + 1; i <= kDeleteButtonIndex; i++)
+        appendBuiltIn(i, false, false);
+    if (!s.hideSeparatorAfterDelete)
+        primaryCommands.Append(muxc::AppBarSeparator());
+    appendBuiltIn(kSortButtonIndex, true, true);
+    appendBuiltIn(kViewButtonIndex, true, true);
+    if (!s.hideSeparatorAfterView)
+        primaryCommands.Append(muxc::AppBarSeparator());
+
+    // The custom items, with the settings item at its position among them.
+    auto customCommands =
+        s.placeOnSecondaryBar ? secondaryCommands : primaryCommands;
+    bool settingsItemAdded = !s.showSettingsItem;
+    auto appendSettingsItem = [&]() {
+        customCommands.Append(MakePreviewButton(CreateGlyphIcon(L""),
+                                                L"Command bar settings", false,
+                                                false, L"general"));
+        settingsItemAdded = true;
+    };
+    m_previewItems.assign(s.items.size(), muxc::AppBarToggleButton{nullptr});
+    int itemPosition = 0;
+    for (int i = 0; i < (int)s.items.size(); i++) {
+        auto const& item = s.items[i];
+        if (IsEmptyActionItem(item))
+            continue;
+        if (!settingsItemAdded && s.settingsItemOrder == itemPosition)
+            appendSettingsItem();
+        m_previewItems[i] = MakePreviewItem(item, i);
+        customCommands.Append(m_previewItems[i]);
+        if (item.separatorAfter)
+            customCommands.Append(muxc::AppBarSeparator());
+        itemPosition++;
+    }
+    if (!settingsItemAdded)
+        appendSettingsItem();
+
+    if (s.contextMenuItem.enabled) {
+        primaryCommands.Append(MakePreviewButton(
+            CreateIconElement(s.contextMenuItem.buttonIcon, std::wstring(),
+                              L""),
+            s.contextMenuItem.buttonLabel, s.contextMenuItem.showLabel, false,
+            L"contextMenu"));
+    }
+    if (!s.hideMoreButton) {
+        primaryCommands.Append(MakePreviewBuiltIn(
+            kPreviewSeeMoreId, CreateGlyphIcon(L""),
+            BuiltInButtonName(kPreviewSeeMoreId), false, false));
+    }
+    if (!s.hideDetailsButton) {
+        secondaryCommands.Append(MakePreviewBuiltIn(
+            kPreviewDetailsId, svgOrGlyphIcon(detailsLook.iconUri, L""),
+            BuiltInButtonName(kPreviewDetailsId), true, false));
+    }
+
+    StyleCardCommandBar(primary);
+    StyleCardCommandBar(secondary);
+
+    muxc::Grid layout;
+    layout.ColumnSpacing(8);
+    AddGridColumn(layout, StarLength());
+    AddGridColumn(layout, AutoLength());
+
+    muxc::ScrollViewer scroller;
+    scroller.HorizontalScrollBarVisibility(muxc::ScrollBarVisibility::Auto);
+    scroller.HorizontalScrollMode(muxc::ScrollMode::Enabled);
+    scroller.VerticalScrollBarVisibility(muxc::ScrollBarVisibility::Disabled);
+    scroller.VerticalScrollMode(muxc::ScrollMode::Disabled);
+    scroller.Content(primary);
+    layout.Children().Append(scroller);
+
+    // The scroll bar is drawn over the content, so while the command bar
+    // doesn't fit, room is made for it below the buttons.
+    auto updateScrollBarRoom = [weakScroller = winrt::make_weak(scroller),
+                                weakPrimary = winrt::make_weak(primary)](
+                                   wf::IInspectable const&,
+                                   mux::SizeChangedEventArgs const&) {
+        auto scroller = weakScroller.get();
+        auto primary = weakPrimary.get();
+        if (!scroller || !primary)
+            return;
+        bool overflows = primary.ActualWidth() > scroller.ActualWidth() + 0.5;
+        double bottom = overflows ? 14 : 0;
+        if (scroller.Padding().Bottom != bottom)
+            scroller.Padding({0, 0, 0, bottom});
+    };
+    scroller.SizeChanged(updateScrollBarRoom);
+    primary.SizeChanged(updateScrollBarRoom);
+
+    muxc::Grid::SetColumn(secondary, 1);
+    layout.Children().Append(secondary);
+
+    m_previewHost.Child(layout);
+    UpdatePreviewSelection();
+}
+
+void SettingsWindow::UpdatePreviewSelection() {
+    int selected = m_selectedPath.empty() ? -1 : m_selectedPath[0];
+    for (int i = 0; i < (int)m_previewItems.size(); i++) {
+        if (auto button = m_previewItems[i])
+            button.IsChecked(i == selected);
+    }
+    for (auto const& [id, button] : m_previewBuiltIns)
+        button.IsChecked(id == m_selectedBuiltIn);
+}
+
+void SettingsWindow::SelectItem(std::vector<int> const& path) {
+    m_selectedBuiltIn = -1;
+    m_selectedPath = path;
+    if (!ItemAt(m_selectedPath))
+        m_selectedPath.clear();
+    UpdatePreviewSelection();
+    BuildItemEditor();
+    UpdateItemToolbar();
+}
+
+bool* SettingsWindow::BuiltInHiddenField(int id) {
+    if (id == kPreviewSeeMoreId)
+        return &m_model.hideMoreButton;
+    if (id == kPreviewDetailsId)
+        return &m_model.hideDetailsButton;
+    if (id >= 0 && id < kDefaultButtonCount)
+        return &m_model.hideDefaultButtons[id];
+    return nullptr;
+}
+
+muxc::AppBarToggleButton SettingsWindow::MakePreviewBuiltIn(
+    int id,
+    muxc::IconElement const& icon,
+    std::wstring const& label,
+    bool showLabel,
+    bool chevron) {
+    muxc::AppBarToggleButton button;
+    ApplyPreviewSelectionStyle(button);
+    button.Label(label);
+    button.Icon(icon);
+    button.LabelPosition(showLabel ? muxc::CommandBarLabelPosition::Default
+                                   : muxc::CommandBarLabelPosition::Collapsed);
+    if (!showLabel)
+        MakeCompactPreviewButton(button);
+    muxc::ToolTipService::SetToolTip(button, BoxString(label));
+    if (showLabel && chevron) {
+        button.Loaded([label](wf::IInspectable const& sender,
+                              mux::RoutedEventArgs const&) {
+            if (auto element = sender.try_as<mux::FrameworkElement>())
+                AddLabelChevron(element, label);
+        });
+    }
+    button.Click([this, id](wf::IInspectable const&,
+                            mux::RoutedEventArgs const&) {
+        SelectBuiltIn(id);
+    });
+
+    m_previewBuiltIns.push_back({id, button});
+    return button;
+}
+
+void SettingsWindow::SelectBuiltIn(int id) {
+    m_selectedBuiltIn = id;
+    m_selectedPath.clear();
+    UpdatePreviewSelection();
+    BuildItemEditor();
+    UpdateItemToolbar();
+}
+
+void SettingsWindow::BuildBuiltInEditor() {
+    auto children = m_editorPanel.Children();
+    int id = m_selectedBuiltIn;
+    int generation = m_editorGeneration;
+    bool* hidden = BuiltInHiddenField(id);
+    if (!hidden)
+        return;
+
+    children.Append(MakeText(L"Built-in button", m_secondaryTextStyle));
+    muxc::TextBlock title;
+    title.Text(BuiltInButtonName(id));
+    title.FontSize(20);
+    title.FontWeight(winrt::Windows::UI::Text::FontWeight{600});
+    title.Margin({0, 2, 0, 16});
+    children.Append(title);
+
+    children.Append(MakeCard(
+        L"", L"This is a built-in File Explorer button",
+        L"Its command and look come from File Explorer, so they can't be "
+        L"changed here, but the button can be hidden.",
+        nullptr, false));
+
+    muxc::ToggleSwitch toggle;
+    toggle.IsOn(!*hidden);
+    toggle.MinWidth(0);
+    toggle.Toggled([this, hidden, generation](wf::IInspectable const& sender,
+                                              mux::RoutedEventArgs const&) {
+        if (generation != m_editorGeneration)
+            return;
+        *hidden = !sender.as<muxc::ToggleSwitch>().IsOn();
+        RebuildPreview();
+        OnModelChanged();
+    });
+    children.Append(MakeCard(L"", L"Show this button",
+                             L"When it's off, the button is hidden from File "
+                             L"Explorer and from the preview above. It can be "
+                             L"shown again on the Built-in buttons page.",
+                             toggle, false));
+
+    muxc::HyperlinkButton allButtonsLink;
+    allButtonsLink.Content(
+        BoxString(L"All built-in buttons, separators and contextual commands"));
+    allButtonsLink.Margin({0, 8, 0, 0});
+    allButtonsLink.Click([this](wf::IInspectable const&,
+                                mux::RoutedEventArgs const&) {
+        NavigateTo(L"builtIn");
+    });
+    children.Append(allButtonsLink);
+}
+
+void SettingsWindow::NavigateTo(std::wstring const& tag) {
+    // Deferred, since the page being left may host the clicked element.
+    auto dispatcherQueue = mud::DispatcherQueue::GetForCurrentThread();
+    if (!dispatcherQueue)
+        return;
+    dispatcherQueue.TryEnqueue([this, tag]() {
+        if (g_settingsWindow != this)
+            return;
+        for (auto const& [navTag, navButton] : m_navButtons) {
+            if (navTag == tag)
+                navButton.IsChecked(true);
+        }
+    });
+}
+
+void SettingsWindow::UpdateItemToolbar() {
+    if (!m_moveUpButton)
+        return;
+    bool hasSelection = ItemAt(m_selectedPath) != nullptr;
+    int index = hasSelection ? m_selectedPath.back() : -1;
+    auto* siblings = hasSelection ? SiblingsOf(m_selectedPath) : nullptr;
+    bool isToolbarItem = m_selectedPath.size() <= 1;
+    m_moveUpButton.Label(isToolbarItem ? L"Move left" : L"Move up");
+    m_moveUpButton.Icon(CreateGlyphIcon(isToolbarItem ? L"" : L""));
+    m_moveDownButton.Label(isToolbarItem ? L"Move right" : L"Move down");
+    m_moveDownButton.Icon(
+        CreateGlyphIcon(isToolbarItem ? L"" : L""));
+    m_moveUpButton.IsEnabled(hasSelection && index > 0);
+    m_moveDownButton.IsEnabled(hasSelection && siblings &&
+                               index + 1 < (int)siblings->size());
+    m_duplicateButton.IsEnabled(hasSelection);
+    m_deleteButton.IsEnabled(hasSelection);
+    m_addEntryItem.IsEnabled(hasSelection);
+    m_addSubmenuItem.IsEnabled(hasSelection);
+}
+
+void SettingsWindow::DeferItemsPageRefresh() {
+    auto dispatcherQueue = mud::DispatcherQueue::GetForCurrentThread();
+    if (!dispatcherQueue)
+        return;
+    dispatcherQueue.TryEnqueue([this]() {
+        if (g_settingsWindow == this)
+            RefreshItemsPage();
+    });
+}
+
+void SettingsWindow::OnItemEdited() {
+    if (ActionItem* item = ItemAt(m_selectedPath)) {
+        int depth = (int)m_selectedPath.size() - 1;
+        if (m_editorIconPreview)
+            m_editorIconPreview.Child(MakeItemIcon(*item, depth, 20));
+    }
+    RebuildPreview();
+    OnModelChanged();
+}
+
+void SettingsWindow::BuildItemEditor() {
+    if (!m_editorPanel)
+        return;
+    m_editorGeneration++;
+    m_editorIconPreview = nullptr;
+    auto children = m_editorPanel.Children();
+    children.Clear();
+
+    if (m_selectedBuiltIn >= 0) {
+        BuildBuiltInEditor();
+        return;
+    }
+
+    ActionItem* item = ItemAt(m_selectedPath);
+    if (!item) {
+        muxc::StackPanel placeholder;
+        placeholder.Spacing(12);
+        placeholder.Margin({0, 72, 0, 0});
+        placeholder.HorizontalAlignment(mux::HorizontalAlignment::Center);
+        auto icon = MakeGlyph(L"\uE70F", 40);
+        icon.Opacity(0.6);
+        placeholder.Children().Append(icon);
+        auto text = MakeText(m_model.items.empty()
+                                 ? L"There are no toolbar items yet. Use Add to "
+                                   L"create one."
+                                 : L"Click one of your items in the command "
+                                   L"bar above to edit it.",
+                             m_secondaryTextStyle);
+        text.FontSize(14);
+        text.TextAlignment(mux::TextAlignment::Center);
+        placeholder.Children().Append(text);
+        children.Append(placeholder);
+        return;
+    }
+
+    int depth = (int)m_selectedPath.size() - 1;
+    std::vector<int> path = m_selectedPath;
+    int generation = m_editorGeneration;
+
+    // Selecting rebuilds this editor, so clicks inside it select later.
+    auto deferSelect = [this](std::vector<int> target) {
+        auto dispatcherQueue = mud::DispatcherQueue::GetForCurrentThread();
+        if (!dispatcherQueue)
+            return;
+        dispatcherQueue.TryEnqueue([this, target]() {
+            if (g_settingsWindow == this && m_editorPanel)
+                SelectItem(target);
+        });
+    };
+
+    // The parents link back to themselves.
+    muxc::StackPanel breadcrumb;
+    breadcrumb.Orientation(muxc::Orientation::Horizontal);
+    std::vector<int> partialPath;
+    for (size_t i = 0; i < path.size(); i++) {
+        partialPath.push_back(path[i]);
+        ActionItem* pathItem = ItemAt(partialPath);
+        if (!pathItem)
+            break;
+        std::wstring name =
+            pathItem->name.empty() ? L"Untitled" : pathItem->name;
+        if (i + 1 < path.size()) {
+            muxc::HyperlinkButton link;
+            link.Content(BoxString(name));
+            link.Padding({0, 0, 0, 0});
+            link.MinHeight(0);
+            link.FontSize(12);
+            link.Click([deferSelect, partialPath](wf::IInspectable const&,
+                                                  mux::RoutedEventArgs const&) {
+                deferSelect(partialPath);
+            });
+            breadcrumb.Children().Append(link);
+            auto separator = MakeText(L"\u00A0\u00A0\u203A\u00A0\u00A0",
+                                      m_secondaryTextStyle);
+            separator.VerticalAlignment(mux::VerticalAlignment::Center);
+            breadcrumb.Children().Append(separator);
+        } else {
+            auto current = MakeText(name, m_secondaryTextStyle);
+            current.VerticalAlignment(mux::VerticalAlignment::Center);
+            breadcrumb.Children().Append(current);
+        }
+    }
+    children.Append(breadcrumb);
+    muxc::TextBlock kindText;
+    kindText.Text(ItemKindName(*item, depth));
+    kindText.FontSize(20);
+    kindText.FontWeight(winrt::Windows::UI::Text::FontWeight{600});
+    kindText.Margin({0, 2, 0, 16});
+    children.Append(kindText);
+
+    auto onText = [this, path, generation](
+                      std::function<void(ActionItem&, std::wstring)> apply) {
+        return [this, path, generation, apply](
+                   wf::IInspectable const& sender,
+                   muxc::TextChangedEventArgs const&) {
+            if (ActionItem* item = EditedItem(path, generation)) {
+                apply(*item, std::wstring(sender.as<muxc::TextBox>().Text()));
+                OnItemEdited();
+            }
+        };
+    };
+    auto onToggle = [this, path, generation](
+                        std::function<void(ActionItem&, bool)> apply) {
+        return [this, path, generation, apply](wf::IInspectable const& sender,
+                                               mux::RoutedEventArgs const&) {
+            if (ActionItem* item = EditedItem(path, generation)) {
+                apply(*item, sender.as<muxc::ToggleSwitch>().IsOn());
+                OnItemEdited();
+            }
+        };
+    };
+    auto makeToggle = [](bool isOn) {
+        muxc::ToggleSwitch toggle;
+        toggle.IsOn(isOn);
+        toggle.MinWidth(0);
+        return toggle;
+    };
+    auto makeFlyoutButton =
+        [](PCWSTR text, winrt::weak_ref<muxc::TextBox> weakTextBox,
+           std::vector<std::pair<std::wstring, std::wstring>> const& entries,
+           bool insertAtCaret) {
+            muxc::DropDownButton button;
+            button.Content(BoxString(text));
+            muxc::MenuFlyout menu;
+            for (auto const& [value, label] : entries) {
+                muxc::MenuFlyoutItem menuItem;
+                menuItem.Text(label);
+                menuItem.Click([weakTextBox, value, insertAtCaret](
+                                   wf::IInspectable const&,
+                                   mux::RoutedEventArgs const&) {
+                    auto textBox = weakTextBox.get();
+                    if (!textBox)
+                        return;
+                    if (insertAtCaret)
+                        textBox.SelectedText(value);
+                    else
+                        textBox.Text(value);
+                    textBox.Focus(mux::FocusState::Programmatic);
+                });
+                menu.Items().Append(menuItem);
+            }
+            button.Flyout(menu);
+            return button;
+        };
+
+    if (depth < kMaxMenuDepth) {
+        muxc::ComboBox typeBox;
+        typeBox.MinWidth(200);
+        typeBox.Items().Append(BoxString(L"Single button"));
+        typeBox.Items().Append(
+            BoxString(depth == 0 ? L"Dropdown menu" : L"Submenu"));
+        typeBox.SelectedIndex(item->isMenu ? 1 : 0);
+        typeBox.SelectionChanged([this, path, generation](
+                                     wf::IInspectable const& sender,
+                                     muxc::SelectionChangedEventArgs const&) {
+            ActionItem* item = EditedItem(path, generation);
+            if (!item)
+                return;
+            bool isMenu = sender.as<muxc::ComboBox>().SelectedIndex() == 1;
+            if (item->isMenu == isMenu)
+                return;
+            item->isMenu = isMenu;
+            if (isMenu && item->subItems.empty()) {
+                item->subItems.push_back(
+                    MakeNewActionItem(false, (int)path.size()));
+            }
+            OnModelChanged();
+            DeferItemsPageRefresh();
+        });
+        children.Append(MakeCard(
+            L"\uE8FD", L"Type",
+            depth == 0 ? L"A single button runs a command, a dropdown menu "
+                         L"opens a list of entries."
+                       : L"A menu entry runs a command, a submenu opens a "
+                         L"nested list of entries.",
+            typeBox, false));
+    }
+
+    auto nameBox = MakeTextBox(item->name, L"Name");
+    nameBox.TextChanged(onText(
+        [](ActionItem& item, std::wstring text) { item.name = text; }));
+    children.Append(MakeCard(L"\uE8AC", L"Name",
+                             depth == 0 ? L"Shown as the button tooltip."
+                                        : L"The menu item text.",
+                             nameBox, true));
+
+    {
+        auto commandBox =
+            MakeTextBox(item->command, L"e.g. wt.exe or internal:TogglePreview");
+        commandBox.TextChanged(onText(
+            [](ActionItem& item, std::wstring text) { item.command = text; }));
+        auto weakCommandBox = winrt::make_weak(commandBox);
+
+        auto browseButton = MakeTextButton(L"Browse\u2026");
+        browseButton.Click([this, weakCommandBox](wf::IInspectable const&,
+                                                  mux::RoutedEventArgs const&) {
+            COMDLG_FILTERSPEC filters[] = {
+                {L"Programs", L"*.exe;*.cmd;*.bat;*.com;*.ps1"},
+                {L"All files", L"*.*"},
+            };
+            std::wstring path =
+                Browse(L"Choose a program", filters, ARRAYSIZE(filters));
+            if (path.empty())
+                return;
+            if (auto textBox = weakCommandBox.get())
+                textBox.Text(path);
+        });
+
+        auto internalButton = makeFlyoutButton(
+            L"Internal", weakCommandBox,
+            {
+                {L"internal:TogglePreview", L"Toggle the Preview pane"},
+                {L"internal:ToggleDetails", L"Toggle the Details pane"},
+                {L"internal:OpenWith", L"Open with\u2026"},
+                {L"internal:FolderOptions", L"Folder Options"},
+            },
+            false);
+
+        muxc::Grid commandRow;
+        commandRow.ColumnSpacing(8);
+        AddGridColumn(commandRow, StarLength());
+        AddGridColumn(commandRow, AutoLength());
+        AddGridColumn(commandRow, AutoLength());
+        commandRow.Children().Append(commandBox);
+        muxc::Grid::SetColumn(browseButton, 1);
+        commandRow.Children().Append(browseButton);
+        muxc::Grid::SetColumn(internalButton, 2);
+        commandRow.Children().Append(internalButton);
+
+        children.Append(MakeCard(
+            L"\uE756", L"Command",
+            item->isMenu && depth < kMaxMenuDepth
+                ? L"For menus the command is only used as an icon source."
+                : L"The executable to run, or an internal File Explorer "
+                  L"command.",
+            commandRow, true));
+    }
+
+    {
+        auto parametersBox =
+            MakeTextBox(item->parameters, L"e.g. -d \"%path%\"");
+        parametersBox.TextChanged(
+            onText([](ActionItem& item, std::wstring text) {
+                item.parameters = text;
+            }));
+        auto insertButton = makeFlyoutButton(
+            L"Insert", winrt::make_weak(parametersBox),
+            {
+                {L"\"%path%\"", L"%path% \u2013 the current folder"},
+                {L"\"%sel%\"", L"%sel% \u2013 all selected items, quoted"},
+                {L"\"%sel_each%\"",
+                 L"%sel_each% \u2013 run once per selected item"},
+            },
+            true);
+
+        muxc::Grid parametersRow;
+        parametersRow.ColumnSpacing(8);
+        AddGridColumn(parametersRow, StarLength());
+        AddGridColumn(parametersRow, AutoLength());
+        parametersRow.Children().Append(parametersBox);
+        muxc::Grid::SetColumn(insertButton, 1);
+        parametersRow.Children().Append(insertButton);
+
+        children.Append(MakeCard(
+            L"\uE943", L"Parameters",
+            L"If a used placeholder has no value (e.g. nothing is selected, or "
+            L"a location like This PC), the command is launched without "
+            L"parameters.",
+            parametersRow, true));
+    }
+
+    {
+        m_editorIconPreview = muxc::Border();
+        if (auto style = FindStyle(L"IconPreviewStyle"))
+            m_editorIconPreview.Style(style);
+        m_editorIconPreview.Width(32);
+        m_editorIconPreview.Height(32);
+        m_editorIconPreview.Child(MakeItemIcon(*item, depth, 20));
+
+        auto iconBox = MakeTextBox(item->icon, L"e.g. E756");
+        iconBox.TextChanged(onText(
+            [](ActionItem& item, std::wstring text) { item.icon = text; }));
+        auto weakIconBox = winrt::make_weak(iconBox);
+
+        auto browseButton = MakeTextButton(L"Browse\u2026");
+        browseButton.Click([this, weakIconBox](wf::IInspectable const&,
+                                               mux::RoutedEventArgs const&) {
+            COMDLG_FILTERSPEC filters[] = {
+                {L"Icons and programs", L"*.ico;*.exe;*.dll"},
+                {L"All files", L"*.*"},
+            };
+            std::wstring path =
+                Browse(L"Choose an icon", filters, ARRAYSIZE(filters));
+            if (path.empty())
+                return;
+            if (auto textBox = weakIconBox.get())
+                textBox.Text(path);
+        });
+
+        auto glyphsButton = MakeTextButton(L"Glyph list");
+        glyphsButton.Click(
+            [](wf::IInspectable const&, mux::RoutedEventArgs const&) {
+                OpenUrl(kGlyphListUrl);
+            });
+
+        muxc::Grid iconRow;
+        iconRow.ColumnSpacing(8);
+        AddGridColumn(iconRow, AutoLength());
+        AddGridColumn(iconRow, StarLength());
+        AddGridColumn(iconRow, AutoLength());
+        AddGridColumn(iconRow, AutoLength());
+        iconRow.Children().Append(m_editorIconPreview);
+        muxc::Grid::SetColumn(iconBox, 1);
+        iconRow.Children().Append(iconBox);
+        muxc::Grid::SetColumn(browseButton, 2);
+        iconRow.Children().Append(browseButton);
+        muxc::Grid::SetColumn(glyphsButton, 3);
+        iconRow.Children().Append(glyphsButton);
+
+        children.Append(MakeCard(
+            L"\uE8B9", L"Icon glyph or icon path",
+            L"A Segoe Fluent Icons code point (e.g. E756), an .exe, .dll or "
+            L".ico path with an optional icon index (e.g. "
+            L"C:\\Windows\\System32\\shell32.dll,3), or "
+            L"shell:AppsFolder\\<AppUserModelID>. Separate two values with | "
+            L"for Light | Dark theme icons. Leave empty to use the icon of "
+            L"the command's executable.",
+            iconRow, true));
+    }
+
+    auto hideIconToggle = makeToggle(item->hideIcon);
+    hideIconToggle.Toggled(onToggle(
+        [](ActionItem& item, bool isOn) { item.hideIcon = isOn; }));
+    children.Append(MakeCard(L"\uED1A", L"Hide icon",
+                             L"Don't show an icon for this item.",
+                             hideIconToggle, false));
+
+    if (depth == 0) {
+        auto showLabelToggle = makeToggle(item->showLabel);
+        showLabelToggle.Toggled(onToggle(
+            [](ActionItem& item, bool isOn) { item.showLabel = isOn; }));
+        children.Append(MakeCard(L"\uE8E9", L"Show label",
+                                 L"Show a text label next to the icon.",
+                                 showLabelToggle, false));
+
+        auto labelBox = MakeTextBox(item->labelText, L"Uses the name when empty");
+        labelBox.Width(280);
+        labelBox.TextChanged(onText(
+            [](ActionItem& item, std::wstring text) { item.labelText = text; }));
+        children.Append(MakeCard(L"\uE8D2", L"Custom label text",
+                                 L"Text displayed next to the icon. If empty, "
+                                 L"the name is used.",
+                                 labelBox, false));
+    }
+
+    auto separatorToggle = makeToggle(item->separatorAfter);
+    separatorToggle.Toggled(onToggle(
+        [](ActionItem& item, bool isOn) { item.separatorAfter = isOn; }));
+    children.Append(MakeCard(
+        L"\uE76F",
+        depth == 0 ? L"Vertical separator after" : L"Separator after",
+        depth == 0 ? L"Show a vertical separator line after this button."
+                   : L"Show a separator line below this menu item.",
+        separatorToggle, false));
+
+    if (item->isMenu && depth < kMaxMenuDepth) {
+        auto header = MakeText(L"Menu entries", m_sectionHeaderStyle);
+        if (!m_sectionHeaderStyle) {
+            header.FontWeight(winrt::Windows::UI::Text::FontWeight{600});
+            header.Margin({1, 28, 0, 8});
+        }
+        children.Append(header);
+
+        for (int i = 0; i < (int)item->subItems.size(); i++) {
+            auto const& entry = item->subItems[i];
+            std::vector<int> entryPath = path;
+            entryPath.push_back(i);
+
+            muxc::Grid row;
+            row.ColumnSpacing(16);
+            AddGridColumn(row, AutoLength());
+            AddGridColumn(row, StarLength());
+            AddGridColumn(row, AutoLength());
+            auto icon = MakeItemIcon(entry, depth + 1, 20);
+            icon.VerticalAlignment(mux::VerticalAlignment::Center);
+            row.Children().Append(icon);
+
+            muxc::StackPanel text;
+            text.VerticalAlignment(mux::VerticalAlignment::Center);
+            muxc::TextBlock title;
+            title.Text(entry.name.empty() ? L"Untitled" : entry.name);
+            title.TextTrimming(mux::TextTrimming::CharacterEllipsis);
+            text.Children().Append(title);
+            auto subtitle =
+                MakeText(DescribeActionItem(entry, depth + 1),
+                         m_secondaryTextStyle);
+            subtitle.TextWrapping(mux::TextWrapping::NoWrap);
+            subtitle.TextTrimming(mux::TextTrimming::CharacterEllipsis);
+            text.Children().Append(subtitle);
+            muxc::Grid::SetColumn(text, 1);
+            row.Children().Append(text);
+
+            auto chevron = MakeGlyph(L"\uE76C", 12);
+            chevron.VerticalAlignment(mux::VerticalAlignment::Center);
+            muxc::Grid::SetColumn(chevron, 2);
+            row.Children().Append(chevron);
+
+            muxc::Button entryButton;
+            entryButton.Content(row);
+            entryButton.HorizontalAlignment(mux::HorizontalAlignment::Stretch);
+            entryButton.HorizontalContentAlignment(
+                mux::HorizontalAlignment::Stretch);
+            entryButton.Padding({16, 10, 16, 10});
+            entryButton.Margin({0, 0, 0, 4});
+            entryButton.Click([deferSelect, entryPath](
+                                  wf::IInspectable const&,
+                                  mux::RoutedEventArgs const&) {
+                deferSelect(entryPath);
+            });
+            children.Append(entryButton);
+        }
+
+        auto addEntryButton = MakeTextButton(L"Add entry");
+        addEntryButton.Margin({0, 4, 0, 0});
+        addEntryButton.Click([this, generation](wf::IInspectable const&,
+                                                mux::RoutedEventArgs const&) {
+            if (generation == m_editorGeneration)
+                AddMenuEntry(false);
+        });
+        children.Append(addEntryButton);
+    }
+}
+
+void SettingsWindow::AddTopLevelItem(bool isMenu) {
+    auto& items = m_model.items;
+    size_t index = m_selectedPath.empty()
+                       ? items.size()
+                       : std::min<size_t>(m_selectedPath[0] + 1, items.size());
+    items.insert(items.begin() + index, MakeNewActionItem(isMenu, 0));
+    m_selectedPath = {(int)index};
+    RefreshItemsPage();
+    OnModelChanged();
+}
+
+void SettingsWindow::AddMenuEntry(bool isMenu) {
+    ActionItem* selected = ItemAt(m_selectedPath);
+    if (!selected)
+        return;
+    int depth = (int)m_selectedPath.size() - 1;
+
+    std::vector<int> parentPath;
+    size_t insertIndex;
+    if (depth == 0 || (depth == 1 && selected->isMenu && !isMenu)) {
+        selected->isMenu = true;
+        parentPath = m_selectedPath;
+        insertIndex = selected->subItems.size();
+    } else {
+        parentPath.assign(m_selectedPath.begin(), m_selectedPath.end() - 1);
+        insertIndex = m_selectedPath.back() + 1;
+    }
+
+    // Submenus only exist on the second level, so with a third level entry
+    // selected, the new submenu goes after its parent.
+    if (isMenu && parentPath.size() == 2) {
+        insertIndex = parentPath.back() + 1;
+        parentPath.pop_back();
+    }
+
+    auto* siblings = ChildrenOf(parentPath);
+    if (!siblings)
+        return;
+    insertIndex = std::min(insertIndex, siblings->size());
+    siblings->insert(siblings->begin() + insertIndex,
+                     MakeNewActionItem(isMenu, (int)parentPath.size()));
+    m_selectedPath = parentPath;
+    m_selectedPath.push_back((int)insertIndex);
+    RefreshItemsPage();
+    OnModelChanged();
+}
+
+void SettingsWindow::MoveSelectedItem(int delta) {
+    if (!ItemAt(m_selectedPath))
+        return;
+    auto* siblings = SiblingsOf(m_selectedPath);
+    int index = m_selectedPath.back();
+    int newIndex = index + delta;
+    if (newIndex < 0 || newIndex >= (int)siblings->size())
+        return;
+    std::swap((*siblings)[index], (*siblings)[newIndex]);
+    m_selectedPath.back() = newIndex;
+    RefreshItemsPage();
+    OnModelChanged();
+}
+
+void SettingsWindow::DuplicateSelectedItem() {
+    ActionItem* selected = ItemAt(m_selectedPath);
+    if (!selected)
+        return;
+    ActionItem copy = *selected;
+    auto* siblings = SiblingsOf(m_selectedPath);
+    int index = m_selectedPath.back() + 1;
+    siblings->insert(siblings->begin() + index, std::move(copy));
+    m_selectedPath.back() = index;
+    RefreshItemsPage();
+    OnModelChanged();
+}
+
+void SettingsWindow::DeleteSelectedItem() {
+    if (!ItemAt(m_selectedPath))
+        return;
+    auto* siblings = SiblingsOf(m_selectedPath);
+    int index = m_selectedPath.back();
+    siblings->erase(siblings->begin() + index);
+    if (!siblings->empty()) {
+        m_selectedPath.back() = std::min(index, (int)siblings->size() - 1);
+    } else {
+        m_selectedPath.pop_back();
+    }
+    RefreshItemsPage();
+    OnModelChanged();
+}
+
+void SettingsWindow::OnModelChanged() {
+    m_dirty = BuildRegEntries(m_model) != m_savedEntries;
+    UpdateFooter();
+}
+
+void SettingsWindow::UpdateFooter() {
+    if (!m_statusText)
+        return;
+    m_statusText.Text(m_saving  ? L"Saving\u2026"
+                      : m_dirty ? L"You have unsaved changes."
+                                : L"No unsaved changes.");
+    m_savingRing.IsActive(m_saving);
+    m_savingRing.Visibility(m_saving ? mux::Visibility::Visible
+                                     : mux::Visibility::Collapsed);
+    m_saveButton.IsEnabled(m_dirty && !m_saving);
+    m_discardButton.IsEnabled(m_dirty && !m_saving);
+}
+
+void SettingsWindow::ShowMessage(muxc::InfoBarSeverity severity,
+                                 std::wstring const& title,
+                                 std::wstring const& message) {
+    m_infoBar.Severity(severity);
+    m_infoBar.Title(title);
+    m_infoBar.Message(message);
+    m_infoBar.IsOpen(true);
+}
+
+void SettingsWindow::Save(bool closeAfter) {
+    if (m_saving) {
+        m_closeAfterSave = m_closeAfterSave || closeAfter;
+        return;
+    }
+
+    auto dispatcherQueue = mud::DispatcherQueue::GetForCurrentThread();
+    if (!dispatcherQueue)
+        return;
+
+    m_saving = true;
+    m_closeAfterSave = closeAfter;
+    m_infoBar.IsOpen(false);
+    UpdateFooter();
+
+    auto job = std::make_shared<SaveJob>();
+    job->entries = BuildRegEntries(m_model);
+    job->settings = m_model;
+    HWND hOwnerWnd = m_hwnd;
+
+    RunShellWorkOnWorkerThread([job, dispatcherQueue, hOwnerWnd]() {
+        job->result = WriteModSettings(job->entries, hOwnerWnd);
+        try {
+            dispatcherQueue.TryEnqueue([job]() {
+                if (g_settingsWindow)
+                    g_settingsWindow->OnSaveCompleted(*job);
+            });
+        } catch (...) {
+            Wh_Log(L"Error %08X", winrt::to_hresult().value);
+        }
+    });
+}
+
+void SettingsWindow::OnSaveCompleted(SaveJob const& job) {
+    m_saving = false;
+    if (job.result.succeeded) {
+        m_saved = job.settings;
+        m_savedEntries = job.entries;
+        m_dirty = BuildRegEntries(m_model) != m_savedEntries;
+        if (m_closeAfterSave) {
+            DestroyWindow(m_hwnd);
+            return;
+        }
+        ShowMessage(muxc::InfoBarSeverity::Success, L"Settings saved",
+                    L"File Explorer applies them in a moment.");
+    } else {
+        Wh_Log(L"Saving failed: %s", job.result.error.c_str());
+        ShowMessage(muxc::InfoBarSeverity::Error,
+                    L"Couldn't save the settings", job.result.error);
+    }
+    m_closeAfterSave = false;
+    UpdateFooter();
+}
+
+void SettingsWindow::Discard() {
+    m_model = m_saved;
+    m_infoBar.IsOpen(false);
+    ShowPage(m_currentPage);
+    OnModelChanged();
+}
+
+void SettingsWindow::RequestClose() {
+    if (g_unloading) {
+        ForceClose();
+        return;
+    }
+    if (m_saving) {
+        m_closeAfterSave = true;
+        return;
+    }
+    if (!m_dirty) {
+        DestroyWindow(m_hwnd);
+        return;
+    }
+    if (!m_dialog)
+        ShowUnsavedChangesDialog();
+}
+
+void SettingsWindow::ShowUnsavedChangesDialog() {
+    try {
+        muxc::ContentDialog dialog;
+        if (auto style = FindStyle(L"DefaultContentDialogStyle"))
+            dialog.Style(style);
+        dialog.XamlRoot(m_root.XamlRoot());
+        dialog.RequestedTheme(m_root.RequestedTheme());
+        dialog.Title(BoxString(L"Save your changes?"));
+        dialog.Content(BoxString(
+            L"Your changes to the Explorer Command Bar settings haven't been "
+            L"saved yet."));
+        dialog.PrimaryButtonText(L"Save");
+        dialog.SecondaryButtonText(L"Don't save");
+        dialog.CloseButtonText(L"Cancel");
+        dialog.DefaultButton(muxc::ContentDialogButton::Primary);
+        m_dialog = dialog;
+
+        dialog.ShowAsync().Completed(
+            [this](wf::IAsyncOperation<muxc::ContentDialogResult> const&
+                       operation,
+                   wf::AsyncStatus status) {
+                if (g_settingsWindow != this)
+                    return;
+                m_dialog = nullptr;
+                if (status != wf::AsyncStatus::Completed)
+                    return;
+                switch (operation.GetResults()) {
+                    case muxc::ContentDialogResult::Primary:
+                        Save(true);
+                        break;
+                    case muxc::ContentDialogResult::Secondary:
+                        DestroyWindow(m_hwnd);
+                        break;
+                    default:
+                        break;
+                }
+            });
+    } catch (...) {
+        Wh_Log(L"Error %08X", winrt::to_hresult().value);
+        m_dialog = nullptr;
+    }
+}
+
+void SettingsWindow::ForceClose() {
+    // A file dialog runs a nested message loop with this window as its owner,
+    // cancel it first. The close message is posted again until the window is
+    // gone.
+    if (m_modalDepth > 0) {
+        if (HWND hPopupWnd = GetWindow(m_hwnd, GW_ENABLEDPOPUP))
+            PostMessageW(hPopupWnd, WM_CLOSE, 0, 0);
+        return;
+    }
+    DestroyWindow(m_hwnd);
+}
+
+std::wstring SettingsWindow::Browse(PCWSTR title,
+                                    COMDLG_FILTERSPEC const* filters,
+                                    UINT filterCount) {
+    m_modalDepth++;
+    std::wstring path = BrowseForFile(m_hwnd, title, filters, filterCount);
+    m_modalDepth--;
+    return g_unloading ? std::wstring() : path;
+}
+
+std::atomic<bool> g_settingsWindowClassRegistered;
+
+// The window runs on the thread of the File Explorer window it was opened
+// from, which already has WinUI set up. WinUI can't be initialized on a
+// thread of the mod's own in File Explorer.
+void OpenSettingsWindow(HWND hHintWnd) {
+    Wh_Log(L"Opening the settings window");
+    if (g_unloading)
+        return;
+    if (!g_settingsWindowClassRegistered) {
+        g_settingsWindowStep = L"registering the window class";
+        ReportSettingsWindowError(L"The window class isn't registered.");
+        return;
+    }
+
+    HWND hExistingWnd;
+    {
+        std::lock_guard<std::mutex> lock(g_settingsWindowMutex);
+        hExistingWnd = g_settingsWindowHwnd;
+    }
+    if (hExistingWnd) {
+        if (IsIconic(hExistingWnd))
+            ShowWindowAsync(hExistingWnd, SW_RESTORE);
+        SetForegroundWindow(hExistingWnd);
+        return;
+    }
+
+    if (g_settingsWindowCreating.exchange(true))
+        return;
+
+    auto* window = new SettingsWindow();
+    if (window->Create(hHintWnd)) {
+        g_settingsWindow = window;
+        std::lock_guard<std::mutex> lock(g_settingsWindowMutex);
+        g_settingsWindowHwnd = window->Hwnd();
+    } else if (HWND hWnd = window->Hwnd()) {
+        // Deletes the window object.
+        DestroyWindow(hWnd);
+    } else {
+        delete window;
+    }
+    g_settingsWindowCreating = false;
+
+    if (g_unloading) {
+        std::lock_guard<std::mutex> lock(g_settingsWindowMutex);
+        if (g_settingsWindowHwnd)
+            PostMessageW(g_settingsWindowHwnd, kSettingsWindowCloseMsg, 0, 0);
+    }
+}
+
+void CloseSettingsWindow() {
+    for (int i = 0;; i++) {
+        HWND hWnd;
+        {
+            std::lock_guard<std::mutex> lock(g_settingsWindowMutex);
+            hWnd = g_settingsWindowHwnd;
+        }
+        if (!hWnd && !g_settingsWindowCreating)
+            break;
+        if (hWnd)
+            PostMessageW(hWnd, kSettingsWindowCloseMsg, 0, 0);
+        Sleep(100);
+        if (i > 0 && i % 50 == 0)
+            Wh_Log(L"Still waiting for the settings window to close");
+    }
+}
+
+void RegisterSettingsWindowClass() {
+    std::wstring className = SettingsWindowClassName();
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = SettingsWindowProc;
+    wc.hInstance = GetCurrentModuleHandle();
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.lpszClassName = className.c_str();
+    if (!RegisterClassExW(&wc)) {
+        Wh_Log(L"RegisterClassEx failed for the settings window: %u",
+               GetLastError());
+        return;
+    }
+    g_settingsWindowClassRegistered = true;
+}
+
 BOOL Wh_ModInit() {
     Wh_Log(L">");
     LoadSettings();
@@ -4361,6 +7844,7 @@ BOOL Wh_ModInit() {
     }
 
     RegisterContextMenuOwnerClass();
+    RegisterSettingsWindowClass();
     return TRUE;
 }
 
@@ -4382,6 +7866,12 @@ void Wh_ModUninit() {
     Wh_Log(L">");
     g_unloading = true;
     DismissOpenContextMenus();
+    CloseSettingsWindow();
+    if (g_settingsWindowClassRegistered) {
+        UnregisterClassW(SettingsWindowClassName().c_str(),
+                         GetCurrentModuleHandle());
+        g_settingsWindowClassRegistered = false;
+    }
 
     for (HWND hWnd : GetFileExplorerWnds()) {
         Wh_Log(L"Removing buttons for window %08X", (DWORD)(ULONG_PTR)hWnd);
