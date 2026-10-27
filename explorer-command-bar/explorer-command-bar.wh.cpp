@@ -262,9 +262,10 @@ active in a process at a time. That makes it compatible with mods and tools
 which do use it, such as **Windows 11 File Explorer Styler**, ExplorerBlurMica
 and TranslucentTB.
 
-File Explorer windows which are already open when the mod is enabled are
-handled too, but if the buttons don't show up in one of them right away, opening
-a new tab or navigating to another folder makes them appear.
+File Explorer windows which are already open when the mod is enabled get the
+buttons right away. Since there's no public way to get from a window to its XAML
+tree, the mod briefly resizes the window's XAML island by one pixel, which makes
+File Explorer report the island's XAML root to a hooked handler.
 
 Thanks to [ArvindSaini978](https://github.com/ArvindSaini978) for contributing.
 */
@@ -3947,7 +3948,10 @@ void OnCommandBarAdded(muxc::CommandBar const& commandBar) {
     UpdateCommandBar(commandBar);
 }
 
+void RestoreNudgedIslandsForCurrentThread();
+
 void RemoveButtonsForCurrentThread() {
+    RestoreNudgedIslandsForCurrentThread();
     UnwatchVisibilityForCurrentThread();
     StopHoverTimersForCurrentThread();
     RevokeHandlersForCurrentThread();
@@ -4032,11 +4036,8 @@ void CollectCommandBars(mux::DependencyObject const& root,
     }
 }
 
-void ScanXamlRootForCommandBars(mux::UIElement const& element) try {
-    if (g_unloading || !element)
-        return;
-    auto xamlRoot = element.XamlRoot();
-    if (!xamlRoot)
+void ScanXamlRoot(mux::XamlRoot const& xamlRoot) try {
+    if (g_unloading || !xamlRoot)
         return;
     auto content = xamlRoot.Content();
     if (!content)
@@ -4050,6 +4051,132 @@ void ScanXamlRootForCommandBars(mux::UIElement const& element) try {
         g_threadScanned = true;
 } catch (...) {
     Wh_Log(L"Error %08X", winrt::to_hresult().value);
+}
+
+void ScanXamlRootForCommandBars(mux::UIElement const& element) try {
+    if (g_unloading || !element)
+        return;
+    ScanXamlRoot(element.XamlRoot());
+} catch (...) {
+    Wh_Log(L"Error %08X", winrt::to_hresult().value);
+}
+
+bool IsXamlRootKnownForCurrentThread(mux::XamlRoot const& xamlRoot) {
+    for (auto const& entry : g_entries) {
+        auto commandBar = entry.commandBar.get();
+        if (commandBar && commandBar.XamlRoot() == xamlRoot)
+            return true;
+    }
+    return false;
+}
+
+bool IsWindowKnownForCurrentThread(HWND hWnd) {
+    for (auto const& entry : g_entries) {
+        auto commandBar = entry.commandBar.get();
+        if (!commandBar)
+            continue;
+        try {
+            auto xamlRoot = commandBar.XamlRoot();
+            auto environment =
+                xamlRoot ? xamlRoot.ContentIslandEnvironment() : nullptr;
+            if (!environment)
+                continue;
+            HWND hRootWnd = (HWND)(uintptr_t)environment.AppWindowId().Value;
+            if (hRootWnd && GetAncestor(hRootWnd, GA_ROOT) == hWnd)
+                return true;
+        } catch (...) {
+            Wh_Log(L"Error %08X", winrt::to_hresult().value);
+        }
+    }
+    return false;
+}
+
+// There's no public API to get from a window to its XAML tree without XAML
+// Diagnostics, and an already open window doesn't rebuild its command bar, so
+// the hooks above might not run for it until the user clicks the command bar.
+// Resizing the window's XAML islands by a pixel raises XamlRoot.Changed, which
+// File Explorer handles in CommandBarControl::OnDpiChanged with the XamlRoot as
+// a typed parameter. The original size is restored shortly after.
+struct IslandNudge {
+    HWND hWnd;
+    int width;
+    int height;
+};
+
+thread_local std::vector<IslandNudge> g_islandNudges;
+thread_local mux::DispatcherTimer g_islandNudgeTimer{nullptr};
+thread_local winrt::event_token g_islandNudgeTickToken;
+
+void RestoreNudgedIslandsForCurrentThread() {
+    if (g_islandNudgeTimer) {
+        try {
+            g_islandNudgeTimer.Stop();
+            g_islandNudgeTimer.Tick(g_islandNudgeTickToken);
+        } catch (...) {
+            Wh_Log(L"Error %08X", winrt::to_hresult().value);
+        }
+        g_islandNudgeTimer = nullptr;
+    }
+
+    std::vector<IslandNudge> taken;
+    taken.swap(g_islandNudges);
+    for (auto const& nudge : taken) {
+        if (!IsWindow(nudge.hWnd))
+            continue;
+        SetWindowPos(nudge.hWnd, nullptr, 0, 0, nudge.width, nudge.height,
+                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE |
+                         SWP_NOOWNERZORDER);
+    }
+}
+
+void NudgeXamlIslandsOfWindow(HWND hWnd) {
+    std::vector<HWND> islands;
+    EnumChildWindows(
+        hWnd,
+        [](HWND hChildWnd, LPARAM lParam) -> BOOL {
+            WCHAR className[64];
+            if (GetWindowThreadProcessId(hChildWnd, nullptr) ==
+                    GetCurrentThreadId() &&
+                GetClassName(hChildWnd, className, ARRAYSIZE(className)) &&
+                wcscmp(className,
+                       L"Microsoft.UI.Content.DesktopChildSiteBridge") == 0) {
+                ((std::vector<HWND>*)lParam)->push_back(hChildWnd);
+            }
+            return TRUE;
+        },
+        (LPARAM)&islands);
+
+    for (HWND hIslandWnd : islands) {
+        RECT rect;
+        if (!IsWindowVisible(hIslandWnd) || !GetWindowRect(hIslandWnd, &rect))
+            continue;
+        int width = rect.right - rect.left;
+        int height = rect.bottom - rect.top;
+        if (width <= 0 || height <= 0)
+            continue;
+        Wh_Log(L"Nudging XAML island %08X of window %08X",
+               (DWORD)(ULONG_PTR)hIslandWnd, (DWORD)(ULONG_PTR)hWnd);
+        g_islandNudges.push_back({hIslandWnd, width, height});
+        SetWindowPos(hIslandWnd, nullptr, 0, 0, width + 1, height,
+                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE |
+                         SWP_NOOWNERZORDER);
+    }
+
+    if (g_islandNudges.empty() || g_islandNudgeTimer)
+        return;
+
+    try {
+        g_islandNudgeTimer = mux::DispatcherTimer();
+        g_islandNudgeTimer.Interval(std::chrono::milliseconds(100));
+        g_islandNudgeTickToken = g_islandNudgeTimer.Tick(
+            [](wf::IInspectable const&, wf::IInspectable const&) {
+                RestoreNudgedIslandsForCurrentThread();
+            });
+        g_islandNudgeTimer.Start();
+    } catch (...) {
+        Wh_Log(L"Error %08X", winrt::to_hresult().value);
+        RestoreNudgedIslandsForCurrentThread();
+    }
 }
 
 void ScheduleXamlRootScan(mux::UIElement const& element) try {
@@ -4094,6 +4221,12 @@ void ScanCurrentThreadForCommandBars() try {
     ScanXamlRootForCommandBars(element);
 } catch (...) {
     Wh_Log(L"Error %08X", winrt::to_hresult().value);
+}
+
+void DiscoverCommandBarsForWindow(HWND hWnd) {
+    ScanCurrentThreadForCommandBars();
+    if (!g_unloading && !IsWindowKnownForCurrentThread(hWnd))
+        NudgeXamlIslandsOfWindow(hWnd);
 }
 
 void ScheduleCurrentThreadScan() try {
@@ -4189,6 +4322,64 @@ void WINAPI CommandBarControl_Wave1_GotFocusHandler_Hook(void* pThis,
     HandleCommandBarControlGotFocus(sender);
 }
 
+// A member function returning a class type gets a hidden return pointer after
+// `this`, and a by-value WinRT parameter is passed as a pointer to a temporary.
+// The XamlRoot is read before the original runs, since the coroutine moves it
+// into its frame. It's queried rather than assumed, so a different layout only
+// makes the hook a no-op.
+using CommandBarControl_OnDpiChanged_t = void*(WINAPI*)(void* pThis,
+                                                         void* pRet,
+                                                         void* sender,
+                                                         void* args);
+CommandBarControl_OnDpiChanged_t CommandBarControl_OnDpiChanged_Original;
+CommandBarControl_OnDpiChanged_t CommandBarControl_Wave1_OnDpiChanged_Original;
+
+mux::XamlRoot GetXamlRootFromByValueParam(void* param) {
+    if (g_unloading || !param)
+        return nullptr;
+    try {
+        wf::IInspectable inspectable;
+        winrt::copy_from_abi(inspectable, *(void**)param);
+        return inspectable ? inspectable.try_as<mux::XamlRoot>() : nullptr;
+    } catch (...) {
+        Wh_Log(L"Error %08X", winrt::to_hresult().value);
+        return nullptr;
+    }
+}
+
+void HandleCommandBarControlXamlRootChanged(mux::XamlRoot const& xamlRoot) {
+    if (g_unloading || !xamlRoot)
+        return;
+    try {
+        if (!IsXamlRootKnownForCurrentThread(xamlRoot))
+            ScanXamlRoot(xamlRoot);
+    } catch (...) {
+        Wh_Log(L"Error %08X", winrt::to_hresult().value);
+    }
+}
+
+void* WINAPI CommandBarControl_OnDpiChanged_Hook(void* pThis,
+                                                 void* pRet,
+                                                 void* sender,
+                                                 void* args) {
+    auto xamlRoot = GetXamlRootFromByValueParam(sender);
+    void* result =
+        CommandBarControl_OnDpiChanged_Original(pThis, pRet, sender, args);
+    HandleCommandBarControlXamlRootChanged(xamlRoot);
+    return result;
+}
+
+void* WINAPI CommandBarControl_Wave1_OnDpiChanged_Hook(void* pThis,
+                                                       void* pRet,
+                                                       void* sender,
+                                                       void* args) {
+    auto xamlRoot = GetXamlRootFromByValueParam(sender);
+    void* result = CommandBarControl_Wave1_OnDpiChanged_Original(pThis, pRet,
+                                                                 sender, args);
+    HandleCommandBarControlXamlRootChanged(xamlRoot);
+    return result;
+}
+
 std::atomic<bool> g_symbolsHooked;
 
 enum class SymbolHookResult {
@@ -4242,6 +4433,24 @@ SymbolHookResult HookFileExplorerExtensionsSymbols(HMODULE module) {
             },
             &CommandBarControl_Wave1_GotFocusHandler_Original,
             CommandBarControl_Wave1_GotFocusHandler_Hook,
+            true,
+        },
+        {
+            {
+                LR"(public: struct winrt::fire_and_forget __cdecl winrt::FileExplorerExtensions::implementation::CommandBarControl::OnDpiChanged(struct winrt::Microsoft::UI::Xaml::XamlRoot,struct winrt::Microsoft::UI::Xaml::XamlRootChangedEventArgs))",
+                LR"(public: struct winrt::fire_and_forget __cdecl winrt::FileExplorerExtensions::implementation::CommandBarControl::OnDpiChanged(struct winrt::Microsoft::UI::Xaml::XamlRoot,struct winrt::Microsoft::UI::Xaml::XamlRootChangedEventArgs) __ptr64)",
+            },
+            &CommandBarControl_OnDpiChanged_Original,
+            CommandBarControl_OnDpiChanged_Hook,
+            true,
+        },
+        {
+            {
+                LR"(public: struct winrt::fire_and_forget __cdecl winrt::FileExplorerExtensions::implementation::CommandBarControl_Wave1::OnDpiChanged(struct winrt::Microsoft::UI::Xaml::XamlRoot,struct winrt::Microsoft::UI::Xaml::XamlRootChangedEventArgs))",
+                LR"(public: struct winrt::fire_and_forget __cdecl winrt::FileExplorerExtensions::implementation::CommandBarControl_Wave1::OnDpiChanged(struct winrt::Microsoft::UI::Xaml::XamlRoot,struct winrt::Microsoft::UI::Xaml::XamlRootChangedEventArgs) __ptr64)",
+            },
+            &CommandBarControl_Wave1_OnDpiChanged_Original,
+            CommandBarControl_Wave1_OnDpiChanged_Hook,
             true,
         },
     };
@@ -8710,7 +8919,9 @@ void Wh_ModAfterInit() {
     HookFileExplorerExtensionsIfLoaded(true);
     for (HWND hWnd : GetFileExplorerWnds()) {
         RunFromWindowThread(
-            hWnd, [](PVOID) { ScanCurrentThreadForCommandBars(); }, nullptr);
+            hWnd,
+            [](PVOID param) { DiscoverCommandBarsForWindow((HWND)param); },
+            hWnd);
     }
 }
 
