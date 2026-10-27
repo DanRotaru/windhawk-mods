@@ -130,6 +130,27 @@ Instead of an executable, the **Command** field can run built-in File Explorer a
 
 ---
 
+## Keyboard shortcuts
+
+Any button or menu entry can have a **Keyboard shortcut**, e.g.
+`Ctrl+Shift+T`, `Alt+N` or `F9`. Pressing it while a File Explorer window is
+active runs the item exactly like a click, with its parameters and
+placeholders resolved for that window. Write the keys joined with `+`,
+case-insensitive.
+
+* Modifiers: `Ctrl`, `Alt`, `Shift` and `Win`.
+* Keys: `A`-`Z`, `0`-`9`, `F1`-`F24`, `Num0`-`Num9`, `Space`, `Enter`, `Tab`,
+  `Esc`, `Backspace`, `Delete`, `Insert`, `Home`, `End`, `PageUp`,
+  `PageDown`, `Up`, `Down`, `Left`, `Right`, `Plus`, and the US layout
+  punctuation keys `-` `,` `.` `;` `/` `` ` `` `[` `\` `]` `'`.
+* A shortcut needs `Ctrl`, `Alt` or `Win`, unless the key is `F1`-`F24`, so
+  that typing in the address bar or a file name isn't affected.
+
+Shortcuts take precedence over File Explorer's own shortcuts. Dropdown menus
+and submenus don't run a command, so their shortcuts are ignored.
+
+---
+
 ## Icons
 
 The **Icon glyph or icon path** field accepts several forms:
@@ -310,6 +331,12 @@ Thanks to [ArvindSaini978](https://github.com/ArvindSaini978) for contributing.
         selected item. If a used placeholder has no value (e.g. no selection,
         or a location like This PC), the command is launched without
         parameters.
+    - shortcut: ""
+      $name: Keyboard shortcut
+      $description: >-
+        Runs the item, like a click, when the keys are pressed in a File
+        Explorer window, e.g. Ctrl+Shift+T, Alt+N or F9. Needs Ctrl, Alt or
+        Win unless the key is F1-F24. Not used for dropdown menus.
     - iconGlyph: ""
       $name: Icon glyph or icon path
       $description: >-
@@ -353,6 +380,11 @@ Thanks to [ArvindSaini978](https://github.com/ArvindSaini978) for contributing.
             Command line parameters. %path% is replaced with the current
             folder path, %sel% with the paths of all selected files/folders,
             %sel_each% runs the command once per selected item.
+        - shortcut: ""
+          $name: Keyboard shortcut
+          $description: >-
+            Runs the menu item when the keys are pressed in a File Explorer
+            window, e.g. Ctrl+Shift+T. Not used for submenus.
         - iconGlyph: ""
           $name: Icon glyph or icon path
           $description: >-
@@ -379,6 +411,11 @@ Thanks to [ArvindSaini978](https://github.com/ArvindSaini978) for contributing.
                 folder path, %sel% with the paths of all selected
                 files/folders, %sel_each% runs the command once per selected
                 item.
+            - shortcut: ""
+              $name: Keyboard shortcut
+              $description: >-
+                Runs the menu item when the keys are pressed in a File
+                Explorer window, e.g. Ctrl+Shift+T.
             - iconGlyph: ""
               $name: Icon glyph or icon path
               $description: >-
@@ -688,6 +725,7 @@ Thanks to [ArvindSaini978](https://github.com/ArvindSaini978) for contributing.
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -714,12 +752,24 @@ struct ActionItem {
     std::wstring labelText;
     std::wstring command;
     std::wstring parameters;
+    std::wstring shortcut;
     std::wstring icon;
     bool hideIcon = false;
     bool showLabel = false;
     bool isMenu = false;
     bool separatorAfter = false;
     std::vector<ActionItem> subItems;
+};
+
+// A key combination: MOD_* flags and a virtual-key code.
+struct KeyboardShortcut {
+    UINT modifiers = 0;
+    UINT vk = 0;
+};
+
+struct ShortcutBinding {
+    KeyboardShortcut shortcut;
+    ActionItem item;
 };
 
 struct DefaultButtonDef {
@@ -781,6 +831,7 @@ struct {
     bool showSettingsItem = true;
     int settingsItemOrder = -1;
     std::vector<ActionItem> items;
+    std::vector<ShortcutBinding> shortcuts;
     NewPlusSettings newPlus;
     ContextMenuItemSettings contextMenuItem;
 } g_settings;
@@ -1680,48 +1731,47 @@ bool IsCommandMatch(std::wstring_view cmd, std::wstring_view actionName) {
     return false;
 }
 
-void OnActionInvoked(mux::FrameworkElement const& elementForWindow,
-                     ActionItem const& item) {
+// Presses the keys in order and releases them in reverse order. Modifiers
+// still held from a keyboard shortcut are released first, so that they don't
+// change the combination.
+void SendKeyCombo(std::initializer_list<WORD> keys) {
+    std::vector<INPUT> inputs;
+    auto addKey = [&inputs](WORD vk, bool up) {
+        INPUT input{};
+        input.type = INPUT_KEYBOARD;
+        input.ki.wVk = vk;
+        input.ki.dwFlags = up ? KEYEVENTF_KEYUP : 0;
+        inputs.push_back(input);
+    };
+
+    for (WORD vk : {VK_LCONTROL, VK_RCONTROL, VK_LSHIFT, VK_RSHIFT, VK_LWIN,
+                    VK_RWIN}) {
+        if (GetAsyncKeyState(vk) < 0)
+            addKey(vk, true);
+    }
+    for (WORD vk : keys)
+        addKey(vk, false);
+    for (auto it = std::rbegin(keys); it != std::rend(keys); ++it)
+        addKey(*it, true);
+
+    SendInput((UINT)inputs.size(), inputs.data(), sizeof(INPUT));
+}
+
+// Runs an item for the given File Explorer window. Called from the thread of
+// the window, on a click or a keyboard shortcut.
+void InvokeActionItem(HWND hWnd, ActionItem const& item) {
     if (item.command.empty() || g_unloading)
         return;
 
-    HWND hWnd = GetExplorerWindowForElement(elementForWindow);
     std::wstring_view cmd = item.command;
 
     if (IsCommandMatch(cmd, L"TogglePreview")) {
-        INPUT inputs[4] = {};
-        inputs[0].type = INPUT_KEYBOARD;
-        inputs[0].ki.wVk = VK_MENU;
-        inputs[1].type = INPUT_KEYBOARD;
-        inputs[1].ki.wVk = 'P';
-        inputs[2].type = INPUT_KEYBOARD;
-        inputs[2].ki.wVk = 'P';
-        inputs[2].ki.dwFlags = KEYEVENTF_KEYUP;
-        inputs[3].type = INPUT_KEYBOARD;
-        inputs[3].ki.wVk = VK_MENU;
-        inputs[3].ki.dwFlags = KEYEVENTF_KEYUP;
-        SendInput(4, inputs, sizeof(INPUT));
+        SendKeyCombo({VK_MENU, 'P'});
         return;
     }
 
     if (IsCommandMatch(cmd, L"ToggleDetails")) {
-        INPUT inputs[6] = {};
-        inputs[0].type = INPUT_KEYBOARD;
-        inputs[0].ki.wVk = VK_MENU;
-        inputs[1].type = INPUT_KEYBOARD;
-        inputs[1].ki.wVk = VK_SHIFT;
-        inputs[2].type = INPUT_KEYBOARD;
-        inputs[2].ki.wVk = 'P';
-        inputs[3].type = INPUT_KEYBOARD;
-        inputs[3].ki.wVk = 'P';
-        inputs[3].ki.dwFlags = KEYEVENTF_KEYUP;
-        inputs[4].type = INPUT_KEYBOARD;
-        inputs[4].ki.wVk = VK_SHIFT;
-        inputs[4].ki.dwFlags = KEYEVENTF_KEYUP;
-        inputs[5].type = INPUT_KEYBOARD;
-        inputs[5].ki.wVk = VK_MENU;
-        inputs[5].ki.dwFlags = KEYEVENTF_KEYUP;
-        SendInput(6, inputs, sizeof(INPUT));
+        SendKeyCombo({VK_MENU, VK_SHIFT, 'P'});
         return;
     }
 
@@ -1752,6 +1802,14 @@ void OnActionInvoked(mux::FrameworkElement const& elementForWindow,
 
     RunShellWorkOnWorkerThread(
         [hWnd, item, context]() { LaunchItemForWindow(hWnd, item, context); });
+}
+
+void OnActionInvoked(mux::FrameworkElement const& elementForWindow,
+                     ActionItem const& item) {
+    if (item.command.empty() || g_unloading)
+        return;
+
+    InvokeActionItem(GetExplorerWindowForElement(elementForWindow), item);
 }
 
 std::wstring GetPowerToysNewPlusFolder() {
@@ -4569,6 +4627,326 @@ bool RunFromWindowThread(HWND hWnd,
     return true;
 }
 
+constexpr int kMaxMenuDepth = 2;
+
+struct KeyName {
+    UINT vk;
+    PCWSTR name;
+};
+
+constexpr KeyName kKeyNames[] = {
+    {VK_SPACE, L"Space"},       {VK_RETURN, L"Enter"},
+    {VK_RETURN, L"Return"},     {VK_TAB, L"Tab"},
+    {VK_ESCAPE, L"Esc"},        {VK_ESCAPE, L"Escape"},
+    {VK_BACK, L"Backspace"},    {VK_DELETE, L"Delete"},
+    {VK_DELETE, L"Del"},        {VK_INSERT, L"Insert"},
+    {VK_INSERT, L"Ins"},        {VK_HOME, L"Home"},
+    {VK_END, L"End"},           {VK_PRIOR, L"PageUp"},
+    {VK_PRIOR, L"PgUp"},        {VK_NEXT, L"PageDown"},
+    {VK_NEXT, L"PgDn"},         {VK_UP, L"Up"},
+    {VK_DOWN, L"Down"},         {VK_LEFT, L"Left"},
+    {VK_RIGHT, L"Right"},       {VK_OEM_PLUS, L"Plus"},
+    {VK_OEM_PLUS, L"="},        {VK_OEM_MINUS, L"-"},
+    {VK_OEM_COMMA, L","},       {VK_OEM_PERIOD, L"."},
+    {VK_OEM_1, L";"},           {VK_OEM_2, L"/"},
+    {VK_OEM_3, L"`"},           {VK_OEM_4, L"["},
+    {VK_OEM_5, L"\\"},          {VK_OEM_6, L"]"},
+    {VK_OEM_7, L"'"},
+};
+
+bool IsModifierKey(UINT vk) {
+    switch (vk) {
+        case VK_SHIFT:
+        case VK_LSHIFT:
+        case VK_RSHIFT:
+        case VK_CONTROL:
+        case VK_LCONTROL:
+        case VK_RCONTROL:
+        case VK_MENU:
+        case VK_LMENU:
+        case VK_RMENU:
+        case VK_LWIN:
+        case VK_RWIN:
+            return true;
+    }
+    return false;
+}
+
+// Plain keys would get in the way of typing, so only function keys may be
+// used without Ctrl, Alt or Win.
+bool IsValidKeyboardShortcut(KeyboardShortcut const& shortcut) {
+    if (!shortcut.vk || IsModifierKey(shortcut.vk))
+        return false;
+    return (shortcut.modifiers & (MOD_CONTROL | MOD_ALT | MOD_WIN)) ||
+           (shortcut.vk >= VK_F1 && shortcut.vk <= VK_F24);
+}
+
+UINT VkFromKeyName(std::wstring_view name) {
+    if (name.size() == 1) {
+        WCHAR c = towupper(name[0]);
+        if ((c >= L'A' && c <= L'Z') || (c >= L'0' && c <= L'9'))
+            return c;
+    }
+    auto numberAfter = [&name](std::wstring_view prefix, int max) {
+        if (name.size() <= prefix.size() || name.size() > prefix.size() + 2 ||
+            _wcsnicmp(name.data(), prefix.data(), prefix.size()) != 0)
+            return -1;
+        int number = 0;
+        for (WCHAR c : name.substr(prefix.size())) {
+            if (c < L'0' || c > L'9')
+                return -1;
+            number = number * 10 + (c - L'0');
+        }
+        return number <= max ? number : -1;
+    };
+    if (int number = numberAfter(L"F", 24); number >= 1)
+        return VK_F1 + number - 1;
+    if (int number = numberAfter(L"Num", 9); number >= 0)
+        return VK_NUMPAD0 + number;
+    for (auto const& key : kKeyNames) {
+        if (name.size() == wcslen(key.name) &&
+            _wcsnicmp(name.data(), key.name, name.size()) == 0)
+            return key.vk;
+    }
+    return 0;
+}
+
+// Parses text like "Ctrl+Shift+T". Returns false for invalid shortcuts.
+bool ParseKeyboardShortcut(std::wstring_view text, KeyboardShortcut* result) {
+    KeyboardShortcut shortcut;
+    bool any = false;
+    while (!text.empty()) {
+        size_t plus = text.find(L'+');
+        std::wstring_view token = text.substr(0, plus);
+        text = plus == std::wstring_view::npos ? std::wstring_view()
+                                               : text.substr(plus + 1);
+        while (!token.empty() && iswspace(token.front()))
+            token.remove_prefix(1);
+        while (!token.empty() && iswspace(token.back()))
+            token.remove_suffix(1);
+        if (token.empty())
+            return false;
+        any = true;
+
+        auto is = [&token](PCWSTR name) {
+            return token.size() == wcslen(name) &&
+                   _wcsnicmp(token.data(), name, token.size()) == 0;
+        };
+        if (is(L"Ctrl") || is(L"Control")) {
+            shortcut.modifiers |= MOD_CONTROL;
+        } else if (is(L"Alt")) {
+            shortcut.modifiers |= MOD_ALT;
+        } else if (is(L"Shift")) {
+            shortcut.modifiers |= MOD_SHIFT;
+        } else if (is(L"Win") || is(L"Windows")) {
+            shortcut.modifiers |= MOD_WIN;
+        } else {
+            if (shortcut.vk)
+                return false;
+            shortcut.vk = VkFromKeyName(token);
+            if (!shortcut.vk)
+                return false;
+        }
+    }
+    if (!any || !IsValidKeyboardShortcut(shortcut))
+        return false;
+    *result = shortcut;
+    return true;
+}
+
+// The modifiers which are currently held down, as MOD_* flags.
+UINT GetHeldModifiers() {
+    UINT modifiers = 0;
+    if (GetAsyncKeyState(VK_CONTROL) < 0)
+        modifiers |= MOD_CONTROL;
+    if (GetAsyncKeyState(VK_MENU) < 0)
+        modifiers |= MOD_ALT;
+    if (GetAsyncKeyState(VK_SHIFT) < 0)
+        modifiers |= MOD_SHIFT;
+    if (GetAsyncKeyState(VK_LWIN) < 0 || GetAsyncKeyState(VK_RWIN) < 0)
+        modifiers |= MOD_WIN;
+    return modifiers;
+}
+
+void CollectShortcutBindings(std::vector<ActionItem> const& items,
+                             int depth,
+                             std::vector<ShortcutBinding>* bindings) {
+    for (auto const& item : items) {
+        bool isMenu = item.isMenu && depth < kMaxMenuDepth;
+        if (isMenu) {
+            CollectShortcutBindings(item.subItems, depth + 1, bindings);
+            continue;
+        }
+        if (item.shortcut.empty() || item.command.empty())
+            continue;
+        KeyboardShortcut shortcut;
+        if (!ParseKeyboardShortcut(item.shortcut, &shortcut)) {
+            Wh_Log(L"Ignoring invalid keyboard shortcut \"%s\" of %s",
+                   item.shortcut.c_str(), item.name.c_str());
+            continue;
+        }
+        bindings->push_back({shortcut, item});
+    }
+}
+
+HANDLE g_shortcutHookThread;
+DWORD g_shortcutHookThreadId;
+// The key of the last handled shortcut, its repeats and release are
+// swallowed too. Only used by the hook thread.
+UINT g_shortcutSwallowedVk;
+
+bool IsFileExplorerWindowOfThisProcess(HWND hWnd) {
+    DWORD processId = 0;
+    WCHAR className[64];
+    return hWnd && GetWindowThreadProcessId(hWnd, &processId) &&
+           processId == GetCurrentProcessId() &&
+           GetClassName(hWnd, className, ARRAYSIZE(className)) &&
+           _wcsicmp(className, L"CabinetWClass") == 0;
+}
+
+LRESULT CALLBACK ShortcutKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode != HC_ACTION || g_unloading)
+        return CallNextHookEx(nullptr, nCode, wParam, lParam);
+
+    auto* keyboard = (KBDLLHOOKSTRUCT const*)lParam;
+    UINT vk = keyboard->vkCode;
+    if (keyboard->flags & LLKHF_INJECTED)
+        return CallNextHookEx(nullptr, nCode, wParam, lParam);
+
+    if (wParam == WM_KEYUP || wParam == WM_SYSKEYUP) {
+        if (vk == g_shortcutSwallowedVk) {
+            g_shortcutSwallowedVk = 0;
+            return 1;
+        }
+        return CallNextHookEx(nullptr, nCode, wParam, lParam);
+    }
+
+    if (wParam != WM_KEYDOWN && wParam != WM_SYSKEYDOWN)
+        return CallNextHookEx(nullptr, nCode, wParam, lParam);
+    if (vk == g_shortcutSwallowedVk)
+        return 1;
+    if (IsModifierKey(vk))
+        return CallNextHookEx(nullptr, nCode, wParam, lParam);
+
+    HWND hWnd = GetForegroundWindow();
+    if (!IsFileExplorerWindowOfThisProcess(hWnd))
+        return CallNextHookEx(nullptr, nCode, wParam, lParam);
+
+    UINT modifiers = GetHeldModifiers();
+    std::optional<ActionItem> item;
+    {
+        std::lock_guard<std::mutex> lock(g_settings.mutex);
+        for (auto const& binding : g_settings.shortcuts) {
+            if (binding.shortcut.vk == vk &&
+                binding.shortcut.modifiers == modifiers) {
+                item = binding.item;
+                break;
+            }
+        }
+    }
+    if (!item)
+        return CallNextHookEx(nullptr, nCode, wParam, lParam);
+
+    g_shortcutSwallowedVk = vk;
+
+    // Releasing Alt or Win alone would open the menu bar or the Start menu,
+    // since the key in between is swallowed. An unassigned key in between
+    // prevents that.
+    if (modifiers & (MOD_ALT | MOD_WIN)) {
+        INPUT inputs[2] = {};
+        inputs[0].type = INPUT_KEYBOARD;
+        inputs[0].ki.wVk = 0xE8;
+        inputs[1] = inputs[0];
+        inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
+        SendInput(2, inputs, sizeof(INPUT));
+    }
+
+    Wh_Log(L"Keyboard shortcut %s for window %08X",
+           item->shortcut.c_str(), (DWORD)(ULONG_PTR)hWnd);
+
+    // The hook must return quickly, and the item has to run on the thread of
+    // the window, like a click.
+    RunShellWorkOnWorkerThread([hWnd, action = std::move(*item)]() {
+        struct Param {
+            HWND hWnd;
+            ActionItem const* item;
+        } param{hWnd, &action};
+        RunFromWindowThread(
+            hWnd,
+            [](PVOID p) {
+                auto* param = (Param*)p;
+                InvokeActionItem(param->hWnd, *param->item);
+            },
+            &param);
+    });
+
+    return 1;
+}
+
+DWORD WINAPI ShortcutHookThread(LPVOID lpParam) {
+    HANDLE readyEvent = (HANDLE)lpParam;
+    // Create the message queue before the thread can be told to quit.
+    MSG msg;
+    PeekMessage(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
+
+    HHOOK hook = SetWindowsHookEx(WH_KEYBOARD_LL, ShortcutKeyboardProc,
+                                  GetCurrentModuleHandle(), 0);
+    if (!hook)
+        Wh_Log(L"SetWindowsHookEx(WH_KEYBOARD_LL) failed: %u", GetLastError());
+    SetEvent(readyEvent);
+    if (!hook)
+        return 0;
+
+    while (GetMessage(&msg, nullptr, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+
+    UnhookWindowsHookEx(hook);
+    return 0;
+}
+
+void StopShortcutHook() {
+    if (!g_shortcutHookThread)
+        return;
+    PostThreadMessage(g_shortcutHookThreadId, WM_QUIT, 0, 0);
+    WaitForSingleObject(g_shortcutHookThread, INFINITE);
+    CloseHandle(g_shortcutHookThread);
+    g_shortcutHookThread = nullptr;
+    g_shortcutHookThreadId = 0;
+}
+
+// The hook only runs while there are shortcuts, since every key press of the
+// system goes through it.
+void UpdateShortcutHook() {
+    bool hasShortcuts;
+    {
+        std::lock_guard<std::mutex> lock(g_settings.mutex);
+        hasShortcuts = !g_settings.shortcuts.empty();
+    }
+
+    if (!hasShortcuts || g_unloading) {
+        StopShortcutHook();
+        return;
+    }
+    if (g_shortcutHookThread)
+        return;
+
+    HANDLE readyEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+    if (!readyEvent)
+        return;
+    g_shortcutHookThread =
+        CreateThread(nullptr, 0, ShortcutHookThread, readyEvent, 0,
+                     &g_shortcutHookThreadId);
+    if (g_shortcutHookThread) {
+        WaitForSingleObject(readyEvent, INFINITE);
+    } else {
+        Wh_Log(L"CreateThread failed for the shortcut hook: %u",
+               GetLastError());
+    }
+    CloseHandle(readyEvent);
+}
+
 std::vector<HWND> GetFileExplorerWnds() {
     std::vector<HWND> hWnds;
     EnumWindows(
@@ -4589,13 +4967,12 @@ std::vector<HWND> GetFileExplorerWnds() {
     return hWnds;
 }
 
-constexpr int kMaxMenuDepth = 2;
-
 ActionItem LoadActionItem(PCWSTR prefix, int depth, bool* isEmpty) {
     auto name = WindhawkUtils::StringSetting::make(L"%s.name", prefix);
     auto command = WindhawkUtils::StringSetting::make(L"%s.command", prefix);
     auto parameters =
         WindhawkUtils::StringSetting::make(L"%s.parameters", prefix);
+    auto shortcut = WindhawkUtils::StringSetting::make(L"%s.shortcut", prefix);
     auto iconGlyph =
         WindhawkUtils::StringSetting::make(L"%s.iconGlyph", prefix);
 
@@ -4603,6 +4980,7 @@ ActionItem LoadActionItem(PCWSTR prefix, int depth, bool* isEmpty) {
     item.name = name.get();
     item.command = command.get();
     item.parameters = parameters.get();
+    item.shortcut = shortcut.get();
     item.icon = iconGlyph.get();
     item.hideIcon = Wh_GetIntSetting(L"%s.hideIcon", prefix) != 0;
     item.showLabel = Wh_GetIntSetting(L"%s.showLabel", prefix) != 0;
@@ -4710,6 +5088,9 @@ void LoadSettings() {
             break;
         g_settings.items.push_back(std::move(item));
     }
+
+    g_settings.shortcuts.clear();
+    CollectShortcutBindings(g_settings.items, 0, &g_settings.shortcuts);
 }
 
 struct EditableSettings {
@@ -5087,6 +5468,7 @@ void AppendItemEntries(std::vector<RegEntry>& entries,
     entries.push_back(StringEntry(prefix + L".name", item.name));
     entries.push_back(StringEntry(prefix + L".command", item.command));
     entries.push_back(StringEntry(prefix + L".parameters", item.parameters));
+    entries.push_back(StringEntry(prefix + L".shortcut", item.shortcut));
     entries.push_back(StringEntry(prefix + L".iconGlyph", item.icon));
     entries.push_back(BoolEntry(prefix + L".hideIcon", item.hideIcon));
     if (depth == 0) {
@@ -5430,6 +5812,8 @@ std::wstring DescribeActionItem(ActionItem const& item, int depth) {
         text = item.command;
         if (!item.parameters.empty())
             text += L" " + item.parameters;
+        if (!item.shortcut.empty())
+            text += L" · " + item.shortcut;
     } else {
         text = L"No command";
     }
@@ -6104,6 +6488,7 @@ ActionItem ImportActionItem(FlatSettings const& root,
     item.name = FlatSettingString(root, prefix + L".name");
     item.command = FlatSettingString(root, prefix + L".command");
     item.parameters = FlatSettingString(root, prefix + L".parameters");
+    item.shortcut = FlatSettingString(root, prefix + L".shortcut");
     item.icon = FlatSettingString(root, prefix + L".iconGlyph");
     item.hideIcon = FlatSettingInt(root, prefix + L".hideIcon", 0) != 0;
     item.showLabel = FlatSettingInt(root, prefix + L".showLabel", 0) != 0;
@@ -8306,6 +8691,18 @@ void SettingsWindow::BuildItemEditor() {
             parametersRow, true));
     }
 
+    if (!item->isMenu || depth >= kMaxMenuDepth) {
+        auto shortcutBox = MakeTextBox(item->shortcut, L"e.g. Ctrl+Shift+T");
+        shortcutBox.TextChanged(onText(
+            [](ActionItem& item, std::wstring text) { item.shortcut = text; }));
+        children.Append(MakeCard(
+            L"", L"Keyboard shortcut",
+            L"Runs the item, like a click, when the keys are pressed in a "
+            L"File Explorer window, e.g. Ctrl+Shift+T, Alt+X or F9. Needs "
+            L"Ctrl, Alt or Win unless the key is F1-F24.",
+            shortcutBox, true));
+    }
+
     {
         m_editorIconPreview = muxc::Border();
         if (auto style = FindStyle(L"IconPreviewStyle"))
@@ -8917,6 +9314,7 @@ BOOL Wh_ModInit() {
 void Wh_ModAfterInit() {
     Wh_Log(L">");
     HookFileExplorerExtensionsIfLoaded(true);
+    UpdateShortcutHook();
     for (HWND hWnd : GetFileExplorerWnds()) {
         RunFromWindowThread(
             hWnd,
@@ -8933,6 +9331,7 @@ void Wh_ModBeforeUninit() {
 void Wh_ModUninit() {
     Wh_Log(L">");
     g_unloading = true;
+    StopShortcutHook();
     DismissOpenContextMenus();
     CloseSettingsWindow();
     if (g_settingsWindowClassRegistered) {
@@ -9008,6 +9407,7 @@ void Wh_ModUninit() {
 void Wh_ModSettingsChanged() {
     Wh_Log(L">");
     LoadSettings();
+    UpdateShortcutHook();
     for (HWND hWnd : GetFileExplorerWnds()) {
         RunFromWindowThread(
             hWnd, [](PVOID) { RefreshButtonsForCurrentThread(); }, nullptr);
