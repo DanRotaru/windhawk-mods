@@ -4829,6 +4829,7 @@ std::vector<SettingsPageDef> DescribeSettingsPages(EditableSettings& s) {
 struct RegEntry {
     std::wstring name;
     bool isString = false;
+    bool isBool = false;
     std::wstring text;
     DWORD number = 0;
     bool operator==(RegEntry const&) const = default;
@@ -4852,6 +4853,13 @@ RegEntry NumberEntry(std::wstring name, int value) {
     return entry;
 }
 
+// Stored as a number like any other, but exported as true or false.
+RegEntry BoolEntry(std::wstring name, bool value) {
+    RegEntry entry = NumberEntry(std::move(name), value);
+    entry.isBool = true;
+    return entry;
+}
+
 // Mirrors LoadActionItem, which stops at the first empty item.
 bool IsEmptyActionItem(ActionItem const& item) {
     if (!item.name.empty() || !item.command.empty())
@@ -4871,13 +4879,13 @@ void AppendItemEntries(std::vector<RegEntry>& entries,
     entries.push_back(StringEntry(prefix + L".command", item.command));
     entries.push_back(StringEntry(prefix + L".parameters", item.parameters));
     entries.push_back(StringEntry(prefix + L".iconGlyph", item.icon));
-    entries.push_back(NumberEntry(prefix + L".hideIcon", item.hideIcon));
+    entries.push_back(BoolEntry(prefix + L".hideIcon", item.hideIcon));
     if (depth == 0) {
-        entries.push_back(NumberEntry(prefix + L".showLabel", item.showLabel));
+        entries.push_back(BoolEntry(prefix + L".showLabel", item.showLabel));
         entries.push_back(StringEntry(prefix + L".labelText", item.labelText));
     }
     entries.push_back(
-        NumberEntry(prefix + L".separatorAfter", item.separatorAfter));
+        BoolEntry(prefix + L".separatorAfter", item.separatorAfter));
 
     if (depth < kMaxMenuDepth) {
         int index = 0;
@@ -4907,7 +4915,7 @@ std::vector<RegEntry> BuildRegEntries(EditableSettings& settings) {
             switch (field.kind) {
                 case SettingKind::Bool:
                     entries.push_back(
-                        NumberEntry(field.key, *(bool*)field.value));
+                        BoolEntry(field.key, *(bool*)field.value));
                     break;
                 case SettingKind::Int:
                     entries.push_back(
@@ -5326,7 +5334,663 @@ std::wstring BrowseForFile(HWND hOwnerWnd,
     return resultPath;
 }
 
+std::wstring BrowseForSaveFile(HWND hOwnerWnd,
+                               PCWSTR title,
+                               COMDLG_FILTERSPEC const* filters,
+                               UINT filterCount,
+                               PCWSTR defaultExtension,
+                               PCWSTR defaultFileName) {
+    winrt::com_ptr<IFileSaveDialog> dialog;
+    if (FAILED(CoCreateInstance(CLSID_FileSaveDialog, nullptr,
+                                CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(dialog.put())))) {
+        return std::wstring();
+    }
+    dialog->SetTitle(title);
+    dialog->SetFileTypes(filterCount, filters);
+    dialog->SetDefaultExtension(defaultExtension);
+    dialog->SetFileName(defaultFileName);
+    DWORD options = 0;
+    dialog->GetOptions(&options);
+    dialog->SetOptions(options | FOS_FORCEFILESYSTEM | FOS_OVERWRITEPROMPT |
+                       FOS_NOCHANGEDIR);
+    if (FAILED(dialog->Show(hOwnerWnd)))
+        return std::wstring();
+
+    winrt::com_ptr<IShellItem> result;
+    PWSTR path = nullptr;
+    if (FAILED(dialog->GetResult(result.put())) ||
+        FAILED(result->GetDisplayName(SIGDN_FILESYSPATH, &path)) || !path) {
+        return std::wstring();
+    }
+    std::wstring resultPath = path;
+    CoTaskMemFree(path);
+    return resultPath;
+}
+
+bool WriteUtf8File(std::wstring const& path, std::wstring const& text) {
+    int length = WideCharToMultiByte(CP_UTF8, 0, text.data(), (int)text.size(),
+                                     nullptr, 0, nullptr, nullptr);
+    std::string bytes((size_t)std::max(length, 0), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text.data(), (int)text.size(),
+                        bytes.data(), length, nullptr, nullptr);
+
+    HANDLE hFile = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE)
+        return false;
+    DWORD written = 0;
+    bool succeeded = WriteFile(hFile, bytes.data(), (DWORD)bytes.size(),
+                               &written, nullptr) &&
+                     written == bytes.size();
+    CloseHandle(hFile);
+    return succeeded;
+}
+
+// Exported settings are YAML laid out like the mod settings in Windhawk. The
+// reader handles the subset the writer produces: nested maps, "- " lists,
+// plain, 'single' and "double" quoted scalars, and comments. Both convert
+// from and to the flat keys Windhawk stores settings under, e.g.
+// items[0].subItems[1].name.
+using FlatSettings = std::unordered_map<std::wstring, std::wstring>;
+
+struct YamlNode {
+    enum class Kind {
+        Scalar,
+        Map,
+        List,
+    };
+    Kind kind = Kind::Map;
+    std::wstring text;
+    std::vector<std::wstring> keys;
+    std::vector<YamlNode> values;
+};
+
+bool YamlStringNeedsQuotes(std::wstring const& value) {
+    if (value.empty() || value.front() == L' ' || value.back() == L' ' ||
+        value.back() == L':')
+        return true;
+    if (wcschr(L"-?:,[]{}#&*!|>'\"%@`+.", value.front()) ||
+        iswdigit(value.front()))
+        return true;
+    if (value.find(L": ") != std::wstring::npos ||
+        value.find(L" #") != std::wstring::npos)
+        return true;
+    for (WCHAR c : value) {
+        if (c < 0x20)
+            return true;
+    }
+    std::wstring lower = ToLower(value);
+    for (PCWSTR word : {L"true", L"false", L"yes", L"no", L"on", L"off", L"y",
+                        L"n", L"null", L"~"}) {
+        if (lower == word)
+            return true;
+    }
+    return false;
+}
+
+std::wstring FormatYamlString(std::wstring const& value) {
+    if (!YamlStringNeedsQuotes(value))
+        return value;
+    // Single quotes keep backslashes as they are, handy for paths.
+    if (value.find(L'\'') == std::wstring::npos)
+        return L"'" + value + L"'";
+    std::wstring result = L"\"";
+    for (WCHAR c : value) {
+        if (c == L'\\' || c == L'"')
+            result += L'\\';
+        result += c;
+    }
+    return result + L"\"";
+}
+
+YamlNode* YamlMapChild(YamlNode* map,
+                       std::wstring const& key,
+                       YamlNode::Kind kind) {
+    for (size_t i = 0; i < map->keys.size(); i++) {
+        if (map->keys[i] == key)
+            return &map->values[i];
+    }
+    map->keys.push_back(key);
+    YamlNode child;
+    child.kind = kind;
+    map->values.push_back(std::move(child));
+    return &map->values.back();
+}
+
+void EmitYamlMap(YamlNode const& map,
+                 size_t indent,
+                 bool listItem,
+                 std::wstring* out) {
+    for (size_t i = 0; i < map.keys.size(); i++) {
+        YamlNode const& value = map.values[i];
+        if (indent == 0 && i > 0 && value.kind != YamlNode::Kind::Scalar)
+            *out += L"\n";
+        if (listItem && i == 0)
+            *out += std::wstring(indent - 2, L' ') + L"- ";
+        else
+            *out += std::wstring(indent, L' ');
+        *out += map.keys[i] + L":";
+        switch (value.kind) {
+            case YamlNode::Kind::Scalar:
+                *out += L" " + value.text + L"\n";
+                break;
+            case YamlNode::Kind::Map:
+                *out += L"\n";
+                EmitYamlMap(value, indent + 2, false, out);
+                break;
+            case YamlNode::Kind::List:
+                if (value.values.empty()) {
+                    *out += L" []\n";
+                    break;
+                }
+                *out += L"\n";
+                for (auto const& element : value.values)
+                    EmitYamlMap(element, indent + 4, true, out);
+                break;
+        }
+    }
+}
+
+std::wstring BuildSettingsYaml(std::vector<RegEntry> const& entries) {
+    YamlNode root;
+    for (auto const& entry : entries) {
+        YamlNode* node = &root;
+        size_t start = 0;
+        while (true) {
+            size_t dot = entry.name.find(L'.', start);
+            bool last = dot == std::wstring::npos;
+            std::wstring segment = entry.name.substr(
+                start, last ? std::wstring::npos : dot - start);
+            size_t bracket = segment.find(L'[');
+            if (bracket != std::wstring::npos) {
+                size_t index = wcstoul(segment.c_str() + bracket + 1, nullptr,
+                                       10);
+                YamlNode* list = YamlMapChild(
+                    node, segment.substr(0, bracket), YamlNode::Kind::List);
+                while (list->values.size() <= index)
+                    list->values.push_back(YamlNode{});
+                node = &list->values[index];
+            } else if (last) {
+                YamlNode* leaf =
+                    YamlMapChild(node, segment, YamlNode::Kind::Scalar);
+                if (entry.isString)
+                    leaf->text = FormatYamlString(entry.text);
+                else if (entry.isBool)
+                    leaf->text = entry.number ? L"true" : L"false";
+                else
+                    leaf->text = std::to_wstring((int)entry.number);
+            } else {
+                node = YamlMapChild(node, segment, YamlNode::Kind::Map);
+            }
+            if (last)
+                break;
+            start = dot + 1;
+        }
+    }
+
+    std::wstring yaml = L"# Explorer Command Bar settings";
+#ifdef WH_MOD_VERSION
+    yaml += L" (v" WH_MOD_VERSION L")";
+#endif
+    yaml +=
+        L"\n# Import them with the Import button of the mod's settings "
+        L"window.\n\n";
+    EmitYamlMap(root, 0, false, &yaml);
+    return yaml;
+}
+
+std::wstring TrimSpaces(std::wstring const& text) {
+    size_t first = text.find_first_not_of(L" \t");
+    if (first == std::wstring::npos)
+        return std::wstring();
+    size_t last = text.find_last_not_of(L" \t");
+    return text.substr(first, last - first + 1);
+}
+
+// Finds the first `target` character outside of quotes. A '#' only
+// counts at the start or after a space, a ':' only before a space or at the
+// end, as in YAML.
+size_t FindYamlUnquoted(std::wstring const& text, WCHAR target) {
+    bool inSingle = false;
+    bool inDouble = false;
+    for (size_t i = 0; i < text.size(); i++) {
+        WCHAR c = text[i];
+        if (inDouble) {
+            if (c == L'\\')
+                i++;
+            else if (c == L'"')
+                inDouble = false;
+            continue;
+        }
+        if (inSingle) {
+            if (c == L'\'')
+                inSingle = false;
+            continue;
+        }
+        if (c == L'"' && (i == 0 || text[i - 1] == L' ')) {
+            inDouble = true;
+        } else if (c == L'\'' && (i == 0 || text[i - 1] == L' ')) {
+            inSingle = true;
+        } else if (c == target) {
+            if (target == L'#' && (i == 0 || text[i - 1] == L' '))
+                return i;
+            if (target == L':' && (i + 1 == text.size() || text[i + 1] == L' '))
+                return i;
+        }
+    }
+    return std::wstring::npos;
+}
+
+bool ParseYamlScalar(std::wstring const& text, std::wstring* value) {
+    value->clear();
+    if (text.empty())
+        return true;
+
+    if (text[0] == L'\'') {
+        size_t i = 1;
+        for (; i < text.size(); i++) {
+            if (text[i] == L'\'') {
+                if (i + 1 < text.size() && text[i + 1] == L'\'') {
+                    *value += L'\'';
+                    i++;
+                    continue;
+                }
+                break;
+            }
+            *value += text[i];
+        }
+        return i < text.size() && TrimSpaces(text.substr(i + 1)).empty();
+    }
+
+    if (text[0] == L'"') {
+        size_t i = 1;
+        for (; i < text.size() && text[i] != L'"'; i++) {
+            if (text[i] != L'\\') {
+                *value += text[i];
+                continue;
+            }
+            if (++i >= text.size())
+                return false;
+            switch (text[i]) {
+                case L'n':
+                    *value += L'\n';
+                    break;
+                case L't':
+                    *value += L'\t';
+                    break;
+                case L'u':
+                    if (i + 4 >= text.size())
+                        return false;
+                    *value += (WCHAR)wcstoul(text.substr(i + 1, 4).c_str(),
+                                             nullptr, 16);
+                    i += 4;
+                    break;
+                default:
+                    *value += text[i];
+                    break;
+            }
+        }
+        return i < text.size() && TrimSpaces(text.substr(i + 1)).empty();
+    }
+
+    *value = text;
+    return true;
+}
+
+struct YamlLine {
+    size_t indent;
+    std::wstring text;
+    int number;
+};
+
+class YamlSettingsReader {
+   public:
+    bool Read(std::wstring const& yaml,
+              FlatSettings* settings,
+              std::wstring* error) {
+        m_settings = settings;
+        m_error = error;
+
+        int number = 0;
+        size_t start = 0;
+        while (start <= yaml.size()) {
+            size_t end = yaml.find(L'\n', start);
+            if (end == std::wstring::npos)
+                end = yaml.size();
+            std::wstring line = yaml.substr(start, end - start);
+            start = end + 1;
+            number++;
+            if (!line.empty() && line.back() == L'\r')
+                line.pop_back();
+
+            size_t indent = line.find_first_not_of(L' ');
+            if (indent == std::wstring::npos)
+                continue;
+            if (line[indent] == L'\t') {
+                *m_error = L"Line " + std::to_wstring(number) +
+                           L": tabs can't be used for indentation.";
+                return false;
+            }
+            size_t comment = FindYamlUnquoted(line, L'#');
+            if (comment != std::wstring::npos)
+                line.resize(comment);
+            std::wstring text = TrimSpaces(line);
+            if (text.empty() || text == L"---" || text == L"...")
+                continue;
+            m_lines.push_back({indent, text, number});
+        }
+
+        if (m_lines.empty())
+            return true;
+        if (!ParseBlock(std::wstring()))
+            return false;
+        if (m_pos < m_lines.size())
+            return Fail(L"unexpected indentation.");
+        return true;
+    }
+
+   private:
+    static bool IsListLine(YamlLine const& line) {
+        return line.text == L"-" || line.text.starts_with(L"- ");
+    }
+
+    bool Fail(std::wstring const& message) {
+        int number = m_lines[std::min(m_pos, m_lines.size() - 1)].number;
+        *m_error = L"Line " + std::to_wstring(number) + L": " + message;
+        return false;
+    }
+
+    bool SetScalar(std::wstring const& path, std::wstring const& text) {
+        std::wstring value;
+        if (!ParseYamlScalar(text, &value))
+            return Fail(L"the quoted value isn't closed.");
+        (*m_settings)[path] = value;
+        return true;
+    }
+
+    bool ParseBlock(std::wstring const& path) {
+        YamlLine const& line = m_lines[m_pos];
+        return IsListLine(line) ? ParseList(line.indent, path)
+                                : ParseMap(line.indent, path);
+    }
+
+    bool ParseMap(size_t indent, std::wstring const& path) {
+        while (m_pos < m_lines.size()) {
+            YamlLine const& line = m_lines[m_pos];
+            if (line.indent < indent || IsListLine(line))
+                return true;
+            if (line.indent > indent)
+                return Fail(L"unexpected indentation.");
+
+            size_t colon = FindYamlUnquoted(line.text, L':');
+            if (colon == std::wstring::npos)
+                return Fail(L"expected \"name: value\".");
+            std::wstring key = TrimSpaces(line.text.substr(0, colon));
+            std::wstring rest = TrimSpaces(line.text.substr(colon + 1));
+            std::wstring childPath = path.empty() ? key : path + L"." + key;
+            m_pos++;
+
+            if (!rest.empty()) {
+                if (rest != L"[]" && rest != L"{}" &&
+                    !SetScalar(childPath, rest))
+                    return false;
+                continue;
+            }
+
+            if (m_pos < m_lines.size()) {
+                YamlLine const& next = m_lines[m_pos];
+                if (next.indent > indent ||
+                    (next.indent == indent && IsListLine(next))) {
+                    if (!ParseBlock(childPath))
+                        return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    bool ParseList(size_t indent, std::wstring const& path) {
+        int index = 0;
+        while (m_pos < m_lines.size()) {
+            YamlLine& line = m_lines[m_pos];
+            if (line.indent > indent)
+                return Fail(L"unexpected indentation.");
+            if (line.indent < indent || !IsListLine(line))
+                return true;
+
+            std::wstring itemPath =
+                path + L"[" + std::to_wstring(index++) + L"]";
+            std::wstring rest = line.text.substr(1);
+            size_t spaces = rest.find_first_not_of(L' ');
+            if (spaces == std::wstring::npos) {
+                m_pos++;
+                if (m_pos < m_lines.size() && m_lines[m_pos].indent > indent &&
+                    !ParseBlock(itemPath))
+                    return false;
+                continue;
+            }
+
+            // "- name: value" continues as a map at the column of "name".
+            line.indent = indent + 1 + spaces;
+            line.text = rest.substr(spaces);
+            if (!IsListLine(line) &&
+                FindYamlUnquoted(line.text, L':') == std::wstring::npos) {
+                if (!SetScalar(itemPath, line.text))
+                    return false;
+                m_pos++;
+                continue;
+            }
+            if (!ParseBlock(itemPath))
+                return false;
+        }
+        return true;
+    }
+
+    std::vector<YamlLine> m_lines;
+    size_t m_pos = 0;
+    FlatSettings* m_settings = nullptr;
+    std::wstring* m_error = nullptr;
+};
+
+// Exported JSON is flat, one Windhawk key per line. The reader also takes
+// nested objects and arrays, laid out like the YAML.
+std::wstring BuildSettingsJson(std::vector<RegEntry> const& entries) {
+    std::wstring json = L"{\n";
+    for (size_t i = 0; i < entries.size(); i++) {
+        auto const& entry = entries[i];
+        json += L"  ";
+        json += wdj::JsonValue::CreateStringValue(entry.name).Stringify();
+        json += L": ";
+        if (entry.isString)
+            json += wdj::JsonValue::CreateStringValue(entry.text).Stringify();
+        else if (entry.isBool)
+            json += entry.number ? L"true" : L"false";
+        else
+            json += std::to_wstring((int)entry.number);
+        json += i + 1 < entries.size() ? L",\n" : L"\n";
+    }
+    return json + L"}\n";
+}
+
+void FlattenJsonSettings(wdj::IJsonValue const& value,
+                         std::wstring const& path,
+                         FlatSettings* settings) {
+    switch (value.ValueType()) {
+        case wdj::JsonValueType::Object:
+            for (auto const& pair : value.GetObject()) {
+                std::wstring key{pair.Key()};
+                FlattenJsonSettings(pair.Value(),
+                                    path.empty() ? key : path + L"." + key,
+                                    settings);
+            }
+            break;
+        case wdj::JsonValueType::Array: {
+            auto array = value.GetArray();
+            for (uint32_t i = 0; i < array.Size(); i++) {
+                FlattenJsonSettings(array.GetAt(i),
+                                    path + L"[" + std::to_wstring(i) + L"]",
+                                    settings);
+            }
+            break;
+        }
+        case wdj::JsonValueType::String:
+            (*settings)[path] = std::wstring(value.GetString());
+            break;
+        case wdj::JsonValueType::Number:
+            (*settings)[path] =
+                std::to_wstring((long long)std::llround(value.GetNumber()));
+            break;
+        case wdj::JsonValueType::Boolean:
+            (*settings)[path] = value.GetBoolean() ? L"true" : L"false";
+            break;
+        case wdj::JsonValueType::Null:
+            (*settings)[path] = std::wstring();
+            break;
+    }
+}
+
+// JSON by the .json extension, YAML by .yaml or .yml, and for other names
+// JSON if the content starts with an object.
+bool IsJsonSettingsFile(std::wstring const& path, std::wstring const& text) {
+    std::wstring extension = ToLower(PathFindExtensionW(path.c_str()));
+    if (extension == L".json")
+        return true;
+    if (extension == L".yaml" || extension == L".yml")
+        return false;
+    size_t first = text.find_first_not_of(L" \t\r\n");
+    return first != std::wstring::npos && text[first] == L'{';
+}
+
+std::wstring FlatSettingString(FlatSettings const& settings,
+                               std::wstring const& key) {
+    auto it = settings.find(key);
+    return it != settings.end() ? it->second : std::wstring();
+}
+
+int FlatSettingInt(FlatSettings const& settings,
+                   std::wstring const& key,
+                   int fallback) {
+    auto it = settings.find(key);
+    if (it == settings.end())
+        return fallback;
+    std::wstring text = ToLower(TrimSpaces(it->second));
+    if (text == L"true" || text == L"yes" || text == L"on")
+        return 1;
+    if (text == L"false" || text == L"no" || text == L"off")
+        return 0;
+    WCHAR* end = nullptr;
+    long value = wcstol(text.c_str(), &end, 10);
+    if (text.empty() || *end)
+        return fallback;
+    return (int)value;
+}
+
+// Mirrors LoadActionItem.
+ActionItem ImportActionItem(FlatSettings const& root,
+                            std::wstring const& prefix,
+                            int depth,
+                            bool* isEmpty) {
+    ActionItem item;
+    item.name = FlatSettingString(root, prefix + L".name");
+    item.command = FlatSettingString(root, prefix + L".command");
+    item.parameters = FlatSettingString(root, prefix + L".parameters");
+    item.icon = FlatSettingString(root, prefix + L".iconGlyph");
+    item.hideIcon = FlatSettingInt(root, prefix + L".hideIcon", 0) != 0;
+    item.showLabel = FlatSettingInt(root, prefix + L".showLabel", 0) != 0;
+    item.labelText = FlatSettingString(root, prefix + L".labelText");
+    item.separatorAfter =
+        FlatSettingInt(root, prefix + L".separatorAfter", 0) != 0;
+
+    if (depth < kMaxMenuDepth) {
+        item.isMenu = FlatSettingString(root, prefix + L".type") == L"menu";
+        for (int i = 0; i < 100; i++) {
+            bool subEmpty = false;
+            ActionItem subItem = ImportActionItem(
+                root, prefix + L".subItems[" + std::to_wstring(i) + L"]",
+                depth + 1, &subEmpty);
+            if (subEmpty)
+                break;
+            item.subItems.push_back(std::move(subItem));
+        }
+    }
+
+    *isEmpty =
+        item.name.empty() && item.command.empty() && item.subItems.empty();
+    return item;
+}
+
+// Reads exported settings over the given ones. The toolbar items are
+// replaced, other settings missing from the file keep their values.
+bool ImportSettingsText(std::wstring const& text,
+                        bool isJson,
+                        EditableSettings* settings,
+                        std::wstring* error) {
+    FlatSettings root;
+    if (isJson) {
+        wdj::JsonValue value{nullptr};
+        if (!wdj::JsonValue::TryParse(text, value) ||
+            value.ValueType() != wdj::JsonValueType::Object) {
+            *error = L"The file isn't a valid JSON object.";
+            return false;
+        }
+        FlattenJsonSettings(value, std::wstring(), &root);
+    } else {
+        std::wstring parseError;
+        if (!YamlSettingsReader().Read(text, &root, &parseError)) {
+            *error = L"The file isn't valid YAML. " + parseError;
+            return false;
+        }
+    }
+
+    int recognized = 0;
+    for (auto const& page : DescribeSettingsPages(*settings)) {
+        for (auto const& field : page.fields) {
+            if (field.kind == SettingKind::Header || !root.count(field.key))
+                continue;
+            recognized++;
+            switch (field.kind) {
+                case SettingKind::Bool: {
+                    auto* value = (bool*)field.value;
+                    *value = FlatSettingInt(root, field.key, *value) != 0;
+                    break;
+                }
+                case SettingKind::Int: {
+                    auto* value = (int*)field.value;
+                    *value = std::max(field.minimum,
+                                      FlatSettingInt(root, field.key, *value));
+                    break;
+                }
+                case SettingKind::String:
+                    *(std::wstring*)field.value =
+                        FlatSettingString(root, field.key);
+                    break;
+                case SettingKind::Header:
+                    break;
+            }
+        }
+    }
+
+    std::vector<ActionItem> items;
+    for (int i = 0; i < 100; i++) {
+        bool isEmpty = false;
+        ActionItem item = ImportActionItem(
+            root, L"items[" + std::to_wstring(i) + L"]", 0, &isEmpty);
+        if (isEmpty)
+            break;
+        items.push_back(std::move(item));
+    }
+
+    if (recognized == 0 && items.empty()) {
+        *error = L"The file doesn't contain Explorer Command Bar settings.";
+        return false;
+    }
+    settings->items = std::move(items);
+    return true;
+}
+
 constexpr UINT kSettingsWindowCloseMsg = WM_APP + 1;
+constexpr PCWSTR kDonateUrl = L"https://buymeacoffee.com/widget/page/danrotaru";
 constexpr PCWSTR kGlyphListUrl =
     L"https://learn.microsoft.com/en-us/windows/apps/design/iconography/"
     L"segoe-fluent-icons-font";
@@ -5401,6 +6065,7 @@ class SettingsWindow {
     void SelectBuiltIn(int id);
     bool* BuiltInHiddenField(int id);
     void BuildBuiltInEditor();
+    void BuildSettingsItemEditor();
     void BuildItemEditor();
     void UpdateItemToolbar();
     void DeferItemsPageRefresh();
@@ -5428,6 +6093,8 @@ class SettingsWindow {
     void ShowUnsavedChangesDialog();
     void ForceClose();
     void CloseXaml();
+    void ExportSettings();
+    void ImportSettings();
     std::wstring Browse(PCWSTR title,
                         COMDLG_FILTERSPEC const* filters,
                         UINT filterCount);
@@ -5972,13 +6639,56 @@ mux::UIElement SettingsWindow::BuildRoot() {
     authorLink.Padding({0, 0, 0, 0});
     authorLink.MinHeight(0);
     authorLink.VerticalAlignment(mux::VerticalAlignment::Center);
-    muxc::ToolTipService::SetToolTip(authorLink, BoxString(L"dan13.me"));
+    muxc::ToolTipService::SetToolTip(authorLink,
+                                     BoxString(L"Developer homepage"));
     authorLink.Click([](wf::IInspectable const&, mux::RoutedEventArgs const&) {
         OpenUrl(L"https://dan13.me/?utm_source=explorer-command-bar");
     });
     credit.Children().Append(authorLink);
-    muxc::Grid::SetRow(credit, 2);
-    pane.Children().Append(credit);
+
+    auto donateButton = MakeTextButton(L"Donate");
+    donateButton.HorizontalAlignment(mux::HorizontalAlignment::Stretch);
+    donateButton.Margin({16, 8, 16, 0});
+    muxc::ToolTipService::SetToolTip(
+        donateButton, BoxString(L"Support the development of this mod"));
+    donateButton.Click([](wf::IInspectable const&,
+                          mux::RoutedEventArgs const&) {
+        OpenUrl(kDonateUrl);
+    });
+
+    muxc::Grid transferButtons;
+    transferButtons.ColumnSpacing(8);
+    transferButtons.Margin({16, 8, 16, 0});
+    AddGridColumn(transferButtons, StarLength());
+    AddGridColumn(transferButtons, StarLength());
+    auto importButton = MakeTextButton(L"Import");
+    importButton.HorizontalAlignment(mux::HorizontalAlignment::Stretch);
+    muxc::ToolTipService::SetToolTip(
+        importButton, BoxString(L"Import settings from a file"));
+    importButton.Click([this](wf::IInspectable const&,
+                              mux::RoutedEventArgs const&) {
+        ImportSettings();
+    });
+    transferButtons.Children().Append(importButton);
+    auto exportButton = MakeTextButton(L"Export");
+    exportButton.HorizontalAlignment(mux::HorizontalAlignment::Stretch);
+    muxc::ToolTipService::SetToolTip(
+        exportButton, BoxString(L"Export all settings to a file"));
+    exportButton.Click([this](wf::IInspectable const&,
+                              mux::RoutedEventArgs const&) {
+        ExportSettings();
+    });
+    muxc::Grid::SetColumn(exportButton, 1);
+    transferButtons.Children().Append(exportButton);
+
+    muxc::StackPanel paneFooter;
+    paneFooter.Children().Append(transferButtons);
+    paneFooter.Children().Append(donateButton);
+    credit.Margin({16, 10, 16, 16});
+    credit.HorizontalAlignment(mux::HorizontalAlignment::Center);
+    paneFooter.Children().Append(credit);
+    muxc::Grid::SetRow(paneFooter, 2);
+    pane.Children().Append(paneFooter);
 
     muxc::StackPanel navItems;
     navItems.Margin({0, 0, 0, 8});
@@ -6335,11 +7045,15 @@ mux::FrameworkElement SettingsWindow::BuildSettingsPage(
 // kDefaultButtons indexes.
 constexpr int kPreviewSeeMoreId = kDefaultButtonCount;
 constexpr int kPreviewDetailsId = kDefaultButtonCount + 1;
+// The settings item (cog) isn't built-in, but is selected the same way.
+constexpr int kPreviewSettingsItemId = kDefaultButtonCount + 2;
 
 std::wstring BuiltInButtonName(int id) {
     std::lock_guard<std::mutex> lock(g_defaultButtonLooksMutex);
     if (id == kPreviewSeeMoreId)
         return L"See more";
+    if (id == kPreviewSettingsItemId)
+        return L"Command bar settings";
     if (id == kPreviewDetailsId) {
         return g_detailsButtonLook.label.empty() ? L"Details"
                                                  : g_detailsButtonLook.label;
@@ -6793,9 +7507,9 @@ void SettingsWindow::RebuildPreview() {
         s.placeOnSecondaryBar ? secondaryCommands : primaryCommands;
     bool settingsItemAdded = !s.showSettingsItem;
     auto appendSettingsItem = [&]() {
-        customCommands.Append(MakePreviewButton(CreateGlyphIcon(L""),
-                                                L"Command bar settings", false,
-                                                false, L"general"));
+        customCommands.Append(MakePreviewBuiltIn(
+            kPreviewSettingsItemId, CreateGlyphIcon(L""),
+            BuiltInButtonName(kPreviewSettingsItemId), false, false));
         settingsItemAdded = true;
     };
     m_previewItems.assign(s.items.size(), muxc::AppBarToggleButton{nullptr});
@@ -6943,6 +7657,42 @@ void SettingsWindow::SelectBuiltIn(int id) {
     UpdateItemToolbar();
 }
 
+// The same cards as on the General page, which also refresh the preview, as
+// they show, hide and move the cog.
+void SettingsWindow::BuildSettingsItemEditor() {
+    auto children = m_editorPanel.Children();
+    children.Append(MakeText(L"Settings item", m_secondaryTextStyle));
+    muxc::TextBlock title;
+    title.Text(BuiltInButtonName(kPreviewSettingsItemId));
+    title.FontSize(20);
+    title.FontWeight(winrt::Windows::UI::Text::FontWeight{600});
+    title.Margin({0, 2, 0, 16});
+    children.Append(title);
+
+    for (auto const& page : DescribeSettingsPages(m_model)) {
+        for (auto const& field : page.fields) {
+            if (field.key != L"showSettingsItem" &&
+                field.key != L"settingsItemOrder")
+                continue;
+            auto control = MakeFieldControl(field);
+            if (auto toggle = control.try_as<muxc::ToggleSwitch>()) {
+                toggle.Toggled([this](wf::IInspectable const&,
+                                      mux::RoutedEventArgs const&) {
+                    RebuildPreview();
+                });
+            } else if (auto numberBox = control.try_as<muxc::NumberBox>()) {
+                numberBox.ValueChanged(
+                    [this](muxc::NumberBox const&,
+                           muxc::NumberBoxValueChangedEventArgs const&) {
+                        RebuildPreview();
+                    });
+            }
+            children.Append(MakeCard(field.glyph, field.title,
+                                     field.description, control, field.wide));
+        }
+    }
+}
+
 void SettingsWindow::BuildBuiltInEditor() {
     auto children = m_editorPanel.Children();
     int id = m_selectedBuiltIn;
@@ -7008,6 +7758,20 @@ void SettingsWindow::NavigateTo(std::wstring const& tag) {
     });
 }
 
+int CountToolbarItems(EditableSettings const& settings) {
+    return (int)std::count_if(
+        settings.items.begin(), settings.items.end(),
+        [](ActionItem const& item) { return !IsEmptyActionItem(item); });
+}
+
+// The position of the settings item among the toolbar items, from 0 (before
+// the first one) to the item count (after the last one).
+int SettingsItemPosition(EditableSettings const& settings) {
+    int count = CountToolbarItems(settings);
+    int order = settings.settingsItemOrder;
+    return order < 0 || order >= count ? count : order;
+}
+
 void SettingsWindow::UpdateItemToolbar() {
     if (!m_moveUpButton)
         return;
@@ -7027,6 +7791,13 @@ void SettingsWindow::UpdateItemToolbar() {
     m_deleteButton.IsEnabled(hasSelection);
     m_addEntryItem.IsEnabled(hasSelection);
     m_addSubmenuItem.IsEnabled(hasSelection);
+
+    if (m_selectedBuiltIn == kPreviewSettingsItemId &&
+        m_model.showSettingsItem) {
+        int position = SettingsItemPosition(m_model);
+        m_moveUpButton.IsEnabled(position > 0);
+        m_moveDownButton.IsEnabled(position < CountToolbarItems(m_model));
+    }
 }
 
 void SettingsWindow::DeferItemsPageRefresh() {
@@ -7057,6 +7828,10 @@ void SettingsWindow::BuildItemEditor() {
     auto children = m_editorPanel.Children();
     children.Clear();
 
+    if (m_selectedBuiltIn == kPreviewSettingsItemId) {
+        BuildSettingsItemEditor();
+        return;
+    }
     if (m_selectedBuiltIn >= 0) {
         BuildBuiltInEditor();
         return;
@@ -7102,6 +7877,7 @@ void SettingsWindow::BuildItemEditor() {
     // The parents link back to themselves.
     muxc::StackPanel breadcrumb;
     breadcrumb.Orientation(muxc::Orientation::Horizontal);
+    breadcrumb.Spacing(6);
     std::vector<int> partialPath;
     for (size_t i = 0; i < path.size(); i++) {
         partialPath.push_back(path[i]);
@@ -7115,14 +7891,15 @@ void SettingsWindow::BuildItemEditor() {
             link.Content(BoxString(name));
             link.Padding({0, 0, 0, 0});
             link.MinHeight(0);
+            link.MinWidth(0);
             link.FontSize(12);
+            link.VerticalAlignment(mux::VerticalAlignment::Center);
             link.Click([deferSelect, partialPath](wf::IInspectable const&,
                                                   mux::RoutedEventArgs const&) {
                 deferSelect(partialPath);
             });
             breadcrumb.Children().Append(link);
-            auto separator = MakeText(L"\u00A0\u00A0\u203A\u00A0\u00A0",
-                                      m_secondaryTextStyle);
+            auto separator = MakeText(L"\u203A", m_secondaryTextStyle);
             separator.VerticalAlignment(mux::VerticalAlignment::Center);
             breadcrumb.Children().Append(separator);
         } else {
@@ -7530,6 +8307,21 @@ void SettingsWindow::AddMenuEntry(bool isMenu) {
 }
 
 void SettingsWindow::MoveSelectedItem(int delta) {
+    // Moving the settings item only changes its order setting. Past the last
+    // item it's -1, the default, so it stays last when items are added.
+    if (m_selectedBuiltIn == kPreviewSettingsItemId) {
+        int count = CountToolbarItems(m_model);
+        int position = SettingsItemPosition(m_model) + delta;
+        if (!m_model.showSettingsItem || position < 0 || position > count)
+            return;
+        m_model.settingsItemOrder = position >= count ? -1 : position;
+        RebuildPreview();
+        BuildItemEditor();
+        UpdateItemToolbar();
+        OnModelChanged();
+        return;
+    }
+
     if (!ItemAt(m_selectedPath))
         return;
     auto* siblings = SiblingsOf(m_selectedPath);
@@ -7738,6 +8530,71 @@ std::wstring SettingsWindow::Browse(PCWSTR title,
     std::wstring path = BrowseForFile(m_hwnd, title, filters, filterCount);
     m_modalDepth--;
     return g_unloading ? std::wstring() : path;
+}
+
+// The save dialog picks the extension of the selected file type, and the
+// extension picks the format.
+constexpr COMDLG_FILTERSPEC kExportFileFilters[] = {
+    {L"YAML", L"*.yaml;*.yml"},
+    {L"JSON", L"*.json"},
+};
+
+constexpr COMDLG_FILTERSPEC kImportFileFilters[] = {
+    {L"Explorer Command Bar settings (YAML, JSON)", L"*.yaml;*.yml;*.json"},
+    {L"YAML", L"*.yaml;*.yml"},
+    {L"JSON", L"*.json"},
+    {L"All files", L"*.*"},
+};
+
+void SettingsWindow::ExportSettings() {
+    m_modalDepth++;
+    std::wstring path = BrowseForSaveFile(
+        m_hwnd, L"Export settings", kExportFileFilters,
+        ARRAYSIZE(kExportFileFilters), L"yaml",
+        L"explorer-command-bar-settings.yaml");
+    m_modalDepth--;
+    if (path.empty() || g_unloading)
+        return;
+
+    auto entries = BuildRegEntries(m_model);
+    bool isJson = ToLower(PathFindExtensionW(path.c_str())) == L".json";
+    if (WriteUtf8File(path, isJson ? BuildSettingsJson(entries)
+                                   : BuildSettingsYaml(entries))) {
+        ShowMessage(muxc::InfoBarSeverity::Success, L"Settings exported",
+                    path);
+    } else {
+        ShowMessage(muxc::InfoBarSeverity::Error,
+                    L"Couldn't export the settings",
+                    L"Writing " + path + L" failed (error " +
+                        std::to_wstring(GetLastError()) + L").");
+    }
+}
+
+void SettingsWindow::ImportSettings() {
+    std::wstring path = Browse(L"Import settings", kImportFileFilters,
+                               ARRAYSIZE(kImportFileFilters));
+    if (path.empty())
+        return;
+
+    std::wstring text = ReadFileAsWideString(path);
+    EditableSettings imported = m_model;
+    std::wstring error;
+    if (text.empty()) {
+        error = L"The file couldn't be read, or it's empty or larger than "
+                L"1 MB.";
+    } else if (ImportSettingsText(text, IsJsonSettingsFile(path, text),
+                                  &imported, &error)) {
+        // Assigned, not replaced, as the controls point into the model.
+        m_model = imported;
+        m_selectedPath.clear();
+        ShowPage(m_currentPage);
+        OnModelChanged();
+        ShowMessage(muxc::InfoBarSeverity::Success, L"Settings imported",
+                    L"Review them, then click Save to apply them.");
+        return;
+    }
+    ShowMessage(muxc::InfoBarSeverity::Error, L"Couldn't import the settings",
+                error);
 }
 
 std::atomic<bool> g_settingsWindowClassRegistered;
