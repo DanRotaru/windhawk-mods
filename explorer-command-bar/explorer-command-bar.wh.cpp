@@ -52,7 +52,8 @@ Explorer.
 - **Hide built-in elements** - individually hide New, Cut, Copy, Paste, Rename,
   Share, Delete, Sort, View, the group separators, the "See more" (…) overflow
   menu, the contextual commands (Set as background, Rotate left, Rotate right,
-  Extract all) and the Details pane toggle.
+  Extract all) and the Details pane toggle. The labels of New, Sort, View and
+  the Details pane toggle can be hidden too, leaving only their icons.
 - **Replace New with New+** - turn Explorer's New button into a *New+* button
   which lists the templates of the
   [PowerToys **New+**](https://learn.microsoft.com/en-us/windows/powertoys/newplus)
@@ -77,7 +78,8 @@ button is added to the command bar. It opens a settings window which follows
 the WinUI 3 design of Windows 11. The toolbar items page shows a live preview
 of the File Explorer command bar with your settings: click one of your items
 (or an entry of one of its menus) to edit it below, with pickers for programs
-and icons, the internal commands and the placeholders. The other settings are
+and icons, the internal commands and the placeholders. Drag the items in the
+preview, or the entries in a menu's list, to reorder them. The other settings are
 grouped into pages with toggles and number boxes.
 
 The window edits the same settings as Windhawk, so both always show the same
@@ -604,6 +606,23 @@ File Explorer report the island's XAML root to a hooked handler.
 - disabledInsteadOfHidden: false
   $name: Disable buttons instead of hiding them
   $description: Gray out inactive buttons instead of removing them from the toolbar.
+- showMenuChevrons: false
+  $name: Show chevrons on dropdowns
+  $description: >-
+    Show a small chevron next to custom toolbar buttons which open a dropdown
+    menu.
+- hideDefaultButtonLabels:
+  - new: false
+    $name: New
+  - sort: false
+    $name: Sort
+  - view: false
+    $name: View
+  - details: false
+    $name: Details pane toggle
+  $name: Hide built-in button labels
+  $description: >-
+    Show only the icon of these built-in buttons, without their text label.
 - hideDefaultButtons:
   - new: false
     $name: New
@@ -866,6 +885,10 @@ constexpr int kDeleteButtonIndex = 6;
 constexpr int kSortButtonIndex = 7;
 constexpr int kViewButtonIndex = 8;
 
+// The built-in buttons shown with a text label, which can be hidden.
+constexpr int kLabeledDefaultButtons[] = {kNewButtonIndex, kSortButtonIndex,
+                                          kViewButtonIndex};
+
 struct NewPlusSettings {
     bool enabled = false;
     bool showLabel = true;
@@ -891,10 +914,13 @@ struct {
     bool disabledInsteadOfHidden = false;
     bool openMenuOnHover = false;
     int menuHoverDelay = 400;
+    bool showMenuChevrons = false;
     bool hideDefaultButtons[kDefaultButtonCount] = {};
+    bool hideDefaultButtonLabels[kDefaultButtonCount] = {};
     bool hideSeparatorAfterButton[kDefaultButtonCount] = {};
     bool hideMoreButton = false;
     bool hideDetailsButton = false;
+    bool hideDetailsButtonLabel = false;
     int itemSpacing = -1;
     bool showSettingsItem = true;
     int settingsItemOrder = -1;
@@ -911,6 +937,7 @@ struct {
 #undef GetCurrentTime
 #include <winrt/Microsoft.UI.Content.h>
 #include <winrt/Microsoft.UI.Dispatching.h>
+#include <winrt/Microsoft.UI.Input.h>
 #include <winrt/Microsoft.UI.Xaml.Automation.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.Primitives.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
@@ -1032,6 +1059,10 @@ struct ManagedElement {
     bool hasOriginalSpacing = false;
     mux::Thickness originalMargin{};
     double originalMinWidth = 0;
+    bool hasOriginalLabelPosition = false;
+    muxc::CommandBarLabelPosition originalLabelPosition =
+        muxc::CommandBarLabelPosition::Default;
+    bool addedToolTip = false;
     bool hasOriginalOverflow = false;
     muxc::CommandBarOverflowButtonVisibility originalOverflow =
         muxc::CommandBarOverflowButtonVisibility::Auto;
@@ -3638,6 +3669,44 @@ void ApplyItemSpacing(muxc::AppBarButton const& button,
     button.MinWidth(0);
 }
 
+// Collapses the label of a built-in button, leaving only its icon.
+void ApplyLabelHiding(muxc::AppBarButton const& button, bool hide) {
+    muxc::CommandBarLabelPosition original;
+    bool addedToolTip;
+    {
+        auto& entry = GetManagedElement(button);
+        if (!entry.hasOriginalLabelPosition) {
+            if (!hide)
+                return;
+            entry.originalLabelPosition = button.LabelPosition();
+            entry.hasOriginalLabelPosition = true;
+        }
+        original = entry.originalLabelPosition;
+        addedToolTip = entry.addedToolTip;
+    }
+
+    auto position = hide ? muxc::CommandBarLabelPosition::Collapsed : original;
+    if (button.LabelPosition() != position)
+        button.LabelPosition(position);
+
+    // Without its label, the button gets it as a tooltip, which is removed
+    // again along with the label hiding.
+    bool toolTipChanged = false;
+    if (hide && !addedToolTip && !button.Label().empty() &&
+        !muxc::ToolTipService::GetToolTip(button)) {
+        muxc::ToolTipService::SetToolTip(button,
+                                         winrt::box_value(button.Label()));
+        addedToolTip = true;
+        toolTipChanged = true;
+    } else if (!hide && addedToolTip) {
+        muxc::ToolTipService::SetToolTip(button, nullptr);
+        addedToolTip = false;
+        toolTipChanged = true;
+    }
+    if (toolTipChanged)
+        GetManagedElement(button).addedToolTip = addedToolTip;
+}
+
 mux::FrameworkElement FindDescendantByName(mux::DependencyObject const& root,
                                            std::wstring_view name) {
     int count = muxm::VisualTreeHelper::GetChildrenCount(root);
@@ -3657,10 +3726,15 @@ void ApplyDefaultButtonVisibility(muxc::CommandBar const& commandBar,
                                   bool forceShow) {
     bool hideMore;
     int itemSpacing;
+    bool hideLabels[kDefaultButtonCount];
+    bool hideDetailsLabel;
     {
         std::lock_guard<std::mutex> lock(g_settings.mutex);
         hideMore = g_settings.hideMoreButton;
         itemSpacing = g_settings.itemSpacing;
+        for (int i = 0; i < kDefaultButtonCount; i++)
+            hideLabels[i] = g_settings.hideDefaultButtonLabels[i];
+        hideDetailsLabel = g_settings.hideDetailsButtonLabel;
     }
 
     bool isPrimary = commandBar.Name() == L"FileExplorerCommandBar";
@@ -3790,6 +3864,8 @@ void ApplyDefaultButtonVisibility(muxc::CommandBar const& commandBar,
         if (entry.isDetailsToggle) {
             setVisibility(entry.command.as<mux::UIElement>(),
                           {ManagedKind::DetailsToggle});
+            if (auto button = entry.command.try_as<muxc::AppBarButton>())
+                ApplyLabelHiding(button, !forceShow && hideDetailsLabel);
             prevIndex = -1;
             continue;
         }
@@ -3799,6 +3875,8 @@ void ApplyDefaultButtonVisibility(muxc::CommandBar const& commandBar,
             setVisibility(button, {ManagedKind::Button, entry.defaultIndex,
                                    hasNewPlusButton});
             ApplyItemSpacing(button, itemSpacing, forceShow);
+            ApplyLabelHiding(button,
+                             !forceShow && hideLabels[entry.defaultIndex]);
         }
 
         prevIndex = entry.defaultIndex;
@@ -4019,12 +4097,78 @@ std::function<void()> MakeShowFlyoutAction(muxc::AppBarButton const& button) {
     };
 }
 
+constexpr WCHAR kChevronGlyph = L'\uE70D';
+
+// Draws the label of a command bar button followed by a small chevron, like
+// File Explorer's own dropdown buttons. With an empty label, only the chevron
+// is drawn. Returns false if the label element wasn't found.
+bool AddChevronToLabel(mux::FrameworkElement const& button,
+                       std::wstring label) try {
+    auto textLabel =
+        FindDescendantByName(button, L"TextLabel").try_as<muxc::TextBlock>();
+    if (!textLabel)
+        return false;
+
+    std::wstring currentText = textLabel.Text().c_str();
+    auto inlines = textLabel.Inlines();
+    if (inlines.Size() > 1 && !currentText.empty() &&
+        currentText.back() == kChevronGlyph) {
+        return true;
+    }
+
+    while (!label.empty() &&
+           (label.back() == kChevronGlyph || label.back() == L' ')) {
+        label.pop_back();
+    }
+
+    inlines.Clear();
+    if (!label.empty()) {
+        muxd::Run text;
+        text.Text(label + L"  ");
+        inlines.Append(text);
+    }
+
+    muxd::Run chevron;
+    chevron.Text(winrt::hstring(&kChevronGlyph, 1));
+    chevron.FontFamily(muxm::FontFamily(L"Segoe Fluent Icons"));
+    chevron.FontSize(8);
+    inlines.Append(chevron);
+    return true;
+} catch (...) {
+    Wh_Log(L"Error %08X", winrt::to_hresult().value);
+    return false;
+}
+
+void AddNewPlusChevron(muxc::AppBarButton const& button) {
+    if (!AddChevronToLabel(button, button.Label().c_str()))
+        Wh_Log(L"The New+ label wasn't found");
+}
+
+// A custom dropdown button with "Show chevrons on dropdowns" enabled. An
+// icon-only button gets the chevron glyph as its label, so that the label
+// element exists to draw the chevron in.
+void AddMenuButtonChevron(muxc::AppBarButton const& button) {
+    std::wstring label = button.Label().c_str();
+    if (label.size() == 1 && label[0] == kChevronGlyph)
+        label.clear();
+    AddChevronToLabel(button, label);
+}
+
+// The label of a custom dropdown button. With a chevron but no label, it's
+// the chevron glyph, replaced by AddMenuButtonChevron once the button loads.
+std::wstring MenuButtonLabel(std::wstring const& label,
+                             bool hasLabel,
+                             bool showChevron) {
+    if (hasLabel)
+        return label;
+    return showChevron ? std::wstring(1, kChevronGlyph) : label;
+}
+
 muxc::AppBarButton CreateMenuButton(ActionItem const& item,
                                     int index,
                                     bool openOnHover,
-                                    int hoverDelayMs) {
-    static constexpr const WCHAR* kMenuArrow = L"\u25BE";
-
+                                    int hoverDelayMs,
+                                    bool showChevron) {
     std::wstring displayLabel = item.GetDisplayLabel();
     ExplorerContext emptyCtx;
     std::wstring fullResolved = (displayLabel.find(L'%') != std::wstring::npos)
@@ -4033,15 +4177,23 @@ muxc::AppBarButton CreateMenuButton(ActionItem const& item,
     std::wstring truncatedDisplay =
         TruncateWithEllipsis(fullResolved, kMaxToolbarLabelLength);
 
-    std::wstring finalLabel;
-    if (item.showLabel && !truncatedDisplay.empty()) {
-        finalLabel = truncatedDisplay + L" " + kMenuArrow;
-    } else {
-        finalLabel = kMenuArrow;
-    }
+    bool hasLabel = item.showLabel && !truncatedDisplay.empty();
+    std::wstring finalLabel = MenuButtonLabel(truncatedDisplay, hasLabel,
+                                              showChevron);
 
-    muxc::AppBarButton button = CreateBareButton(
-        index, fullResolved, finalLabel, MakeCommandButtonIcon(item), true);
+    muxc::AppBarButton button =
+        CreateBareButton(index, fullResolved, finalLabel,
+                         MakeCommandButtonIcon(item), hasLabel || showChevron);
+
+    if (showChevron) {
+        TrackRevoker(
+            button,
+            button.Loaded(winrt::auto_revoke, [](wf::IInspectable const& sender,
+                                                 mux::RoutedEventArgs const&) {
+                if (auto button = sender.try_as<muxc::AppBarButton>())
+                    AddMenuButtonChevron(button);
+            }));
+    }
 
     auto weakButton = winrt::make_weak(button);
 
@@ -4267,36 +4419,6 @@ void PopulateNewPlusMenu(
 
         items.Append(openFolderItem);
     }
-} catch (...) {
-    Wh_Log(L"Error %08X", winrt::to_hresult().value);
-}
-
-void AddNewPlusChevron(muxc::AppBarButton const& button) try {
-    auto label =
-        FindDescendantByName(button, L"TextLabel").try_as<muxc::TextBlock>();
-    if (!label) {
-        Wh_Log(L"The New+ label wasn't found");
-        return;
-    }
-
-    std::wstring currentText = label.Text().c_str();
-    if (!currentText.empty() && currentText.back() == L'\uE70D')
-        return;
-
-    auto inlines = label.Inlines();
-    inlines.Clear();
-
-    muxd::Run text;
-    std::wstring labelText = button.Label().c_str();
-    labelText += L"  ";
-    text.Text(labelText);
-    inlines.Append(text);
-
-    muxd::Run chevron;
-    chevron.Text(L"\uE70D");
-    chevron.FontFamily(muxm::FontFamily(L"Segoe Fluent Icons"));
-    chevron.FontSize(8);
-    inlines.Append(chevron);
 } catch (...) {
     Wh_Log(L"Error %08X", winrt::to_hresult().value);
 }
@@ -4644,10 +4766,12 @@ void UpdateDynamicButtonStates(muxc::CommandBar const& commandBar,
 
     std::vector<ActionItem> itemSnapshots;
     bool disabledInsteadOfHidden;
+    bool showMenuChevrons;
     {
         std::lock_guard<std::mutex> lock(g_settings.mutex);
         itemSnapshots = g_settings.items;
         disabledInsteadOfHidden = g_settings.disabledInsteadOfHidden;
+        showMenuChevrons = g_settings.showMenuChevrons;
     }
 
     for (uint32_t i = 0; i < count; i++) {
@@ -4683,13 +4807,17 @@ void UpdateDynamicButtonStates(muxc::CommandBar const& commandBar,
             std::wstring displayResolved =
                 TruncateWithEllipsis(fullResolved, kMaxToolbarLabelLength);
 
-            if (item.isMenu) {
-                if (item.showLabel && !displayResolved.empty())
-                    displayResolved += L" \u25BE";
-                else
-                    displayResolved = L"\u25BE";
+            bool isMenuButton = item.isMenu && !item.subItems.empty();
+            if (isMenuButton) {
+                displayResolved = MenuButtonLabel(
+                    displayResolved,
+                    item.showLabel && !displayResolved.empty(),
+                    showMenuChevrons);
             }
             button.Label(displayResolved.c_str());
+            // Setting the label replaces the text drawn with the chevron.
+            if (isMenuButton && showMenuChevrons)
+                AddMenuButtonChevron(button);
             muxc::ToolTipService::SetToolTip(
                 button, winrt::box_value(winrt::hstring{fullResolved}));
         }
@@ -4822,11 +4950,13 @@ void EnsureActionButtons(muxc::CommandBar const& commandBar) {
 
     bool openMenuOnHover;
     int menuHoverDelay;
+    bool showMenuChevrons;
     std::vector<ActionItem> items;
     {
         std::lock_guard<std::mutex> lock(g_settings.mutex);
         openMenuOnHover = g_settings.openMenuOnHover;
         menuHoverDelay = g_settings.menuHoverDelay;
+        showMenuChevrons = g_settings.showMenuChevrons;
         items = g_settings.items;
     }
 
@@ -4844,7 +4974,7 @@ void EnsureActionButtons(muxc::CommandBar const& commandBar) {
                 commands.InsertAt(
                     insertIndex++,
                     CreateMenuButton(item, (int)i, openMenuOnHover,
-                                     menuHoverDelay));
+                                     menuHoverDelay, showMenuChevrons));
             } else {
                 commands.InsertAt(insertIndex++,
                                   CreateActionButton(item, (int)i));
@@ -4866,7 +4996,7 @@ void EnsureActionButtons(muxc::CommandBar const& commandBar) {
         auto const& item = items[i];
         if (item.isMenu && !item.subItems.empty()) {
             commands.Append(CreateMenuButton(item, (int)i, openMenuOnHover,
-                                             menuHoverDelay));
+                                             menuHoverDelay, showMenuChevrons));
         } else {
             commands.Append(CreateActionButton(item, (int)i));
         }
@@ -6149,6 +6279,17 @@ void LoadSettings() {
     g_settings.hideDetailsButton =
         Wh_GetIntSetting(L"hideDefaultButtons.details") != 0;
 
+    g_settings.showMenuChevrons = Wh_GetIntSetting(L"showMenuChevrons") != 0;
+    memset(g_settings.hideDefaultButtonLabels, 0,
+           sizeof(g_settings.hideDefaultButtonLabels));
+    for (int index : kLabeledDefaultButtons) {
+        g_settings.hideDefaultButtonLabels[index] =
+            Wh_GetIntSetting(L"hideDefaultButtonLabels.%s",
+                             kDefaultButtons[index].settingKey) != 0;
+    }
+    g_settings.hideDetailsButtonLabel =
+        Wh_GetIntSetting(L"hideDefaultButtonLabels.details") != 0;
+
     memset(g_settings.hideSeparatorAfterButton, 0,
            sizeof(g_settings.hideSeparatorAfterButton));
     g_settings.hideSeparatorAfterButton[kNewButtonIndex] =
@@ -6225,6 +6366,9 @@ struct EditableSettings {
     bool hideSeparatorAfterView = false;
     bool hideMoreButton = false;
     bool hideDetailsButton = false;
+    bool showMenuChevrons = false;
+    bool hideDefaultButtonLabels[kDefaultButtonCount] = {};
+    bool hideDetailsButtonLabel = false;
     NewPlusSettings newPlus;
     ContextMenuItemSettings contextMenuItem;
 };
@@ -6250,6 +6394,12 @@ EditableSettings SnapshotSettings() {
         g_settings.hideSeparatorAfterButton[kViewButtonIndex];
     settings.hideMoreButton = g_settings.hideMoreButton;
     settings.hideDetailsButton = g_settings.hideDetailsButton;
+    settings.showMenuChevrons = g_settings.showMenuChevrons;
+    for (int i = 0; i < kDefaultButtonCount; i++) {
+        settings.hideDefaultButtonLabels[i] =
+            g_settings.hideDefaultButtonLabels[i];
+    }
+    settings.hideDetailsButtonLabel = g_settings.hideDetailsButtonLabel;
     settings.newPlus = g_settings.newPlus;
     settings.contextMenuItem = g_settings.contextMenuItem;
     return settings;
@@ -6363,6 +6513,16 @@ std::vector<SettingsPageDef> DescribeSettingsPages(EditableSettings& s) {
                          kDefaultButtonGlyphs[index], true);
     };
 
+    auto labelField = [&s](int index) {
+        std::wstring title = std::wstring(L"Hide the ") +
+                             kDefaultButtonTitles[index] + L" label";
+        return BoolField(std::wstring(L"hideDefaultButtonLabels.") +
+                             kDefaultButtons[index].settingKey,
+                         title.c_str(), L"Show only its icon.",
+                         &s.hideDefaultButtonLabels[index],
+                         kDefaultButtonGlyphs[index]);
+    };
+
     std::vector<SettingsPageDef> pages;
 
     SettingsPageDef builtIn;
@@ -6389,6 +6549,13 @@ std::vector<SettingsPageDef> DescribeSettingsPages(EditableSettings& s) {
                   L"\uE712", true),
         BoolField(L"hideDefaultButtons.details", L"Details pane toggle", L"",
                   &s.hideDetailsButton, L"\uE946", true),
+        HeaderField(L"Labels"),
+        labelField(kNewButtonIndex),
+        labelField(kSortButtonIndex),
+        labelField(kViewButtonIndex),
+        BoolField(L"hideDefaultButtonLabels.details",
+                  L"Hide the Details pane toggle label", L"Show only its icon.",
+                  &s.hideDetailsButtonLabel, L"\uE946"),
         HeaderField(L"Contextual commands"),
         buttonField(9, L"Shown when an image file is selected."),
         buttonField(10, L"Shown when an image file is selected."),
@@ -6518,6 +6685,10 @@ std::vector<SettingsPageDef> DescribeSettingsPages(EditableSettings& s) {
                   L"(next to the Details and Preview pane toggles) instead of "
                   L"the main toolbar.",
                   &s.placeOnSecondaryBar, L"\uE90D"),
+        BoolField(L"showMenuChevrons", L"Show chevrons on dropdowns",
+                  L"Show a small chevron next to custom toolbar buttons which "
+                  L"open a dropdown menu.",
+                  &s.showMenuChevrons, L"\uE70D"),
         IntField(L"itemSpacing", L"Item spacing (pixels at 100% scaling)",
                  L"Horizontal spacing between the command bar buttons. -1 "
                  L"leaves the default spacing unchanged. Any other value also "
@@ -7794,6 +7965,35 @@ class SettingsWindow {
     ActionItem* ItemAt(std::vector<int> const& path);
     ActionItem* EditedItem(std::vector<int> const& path, int generation);
 
+    // Reordering by dragging, for the toolbar items of the preview and for
+    // the entries of a menu. A group lists the elements which can be dragged
+    // among each other, in their order.
+    enum DragGroup { kDragGroupPreview, kDragGroupEntries, kDragGroupCount };
+    void SetDragGroup(int group,
+                      mux::UIElement const& reference,
+                      std::vector<mux::UIElement> elements,
+                      std::function<void(int from, int to)> commit);
+    void ClearDragGroup(int group);
+    void EnableDragReorder(mux::UIElement const& element, int group, int slot);
+    void OnDragPointerPressed(mux::UIElement const& element,
+                              mux::Input::PointerRoutedEventArgs const& args,
+                              int group,
+                              int slot);
+    void OnDragPointerMoved(mux::UIElement const& element,
+                            mux::Input::PointerRoutedEventArgs const& args,
+                            int group,
+                            int slot);
+    bool BeginDrag(mux::UIElement const& element,
+                   mux::Input::PointerRoutedEventArgs const& args);
+    void UpdateDrag(double delta);
+    void EndDrag(bool commit);
+    void ResetDragVisuals(int group);
+    bool IsDragClick() const { return m_drag.active || m_suppressDragClick; }
+    void ReorderToolbarItems(std::vector<int> order, int from, int to);
+    void ReorderMenuEntries(std::vector<int> const& parentPath,
+                            int from,
+                            int to);
+
     void AddTopLevelItem(bool isMenu);
     void AddMenuEntry(bool isMenu);
     void MoveSelectedItem(int delta);
@@ -7861,6 +8061,26 @@ class SettingsWindow {
     muxc::MenuFlyoutItem m_addEntryItem{nullptr};
     muxc::MenuFlyoutItem m_addSubmenuItem{nullptr};
     int m_editorGeneration = 0;
+
+    struct DragGroupState {
+        mux::UIElement reference{nullptr};
+        std::vector<mux::UIElement> elements;
+        std::function<void(int, int)> commit;
+    };
+    struct DragState {
+        bool pressed = false;
+        bool active = false;
+        int group = -1;
+        int slot = -1;
+        int target = -1;
+        uint32_t pointerId = 0;
+        wf::Point pressPoint{};
+        std::vector<double> starts;
+        std::vector<double> sizes;
+    };
+    DragGroupState m_dragGroups[kDragGroupCount];
+    DragState m_drag;
+    bool m_suppressDragClick = false;
 };
 
 std::wstring SettingsWindowClassName() {
@@ -8784,31 +9004,6 @@ std::wstring BuiltInButtonName(int id) {
                : g_defaultButtonLooks[id].label;
 }
 
-// Like AddNewPlusChevron, for any command bar button with a visible label.
-void AddLabelChevron(mux::FrameworkElement const& button,
-                     std::wstring const& label) try {
-    auto textLabel =
-        FindDescendantByName(button, L"TextLabel").try_as<muxc::TextBlock>();
-    if (!textLabel)
-        return;
-    std::wstring currentText = textLabel.Text().c_str();
-    if (!currentText.empty() && currentText.back() == L'')
-        return;
-
-    auto inlines = textLabel.Inlines();
-    inlines.Clear();
-    muxd::Run text;
-    text.Text(label + L"  ");
-    inlines.Append(text);
-    muxd::Run chevron;
-    chevron.Text(L"");
-    chevron.FontFamily(muxm::FontFamily(L"Segoe Fluent Icons"));
-    chevron.FontSize(8);
-    inlines.Append(chevron);
-} catch (...) {
-    Wh_Log(L"Error %08X", winrt::to_hresult().value);
-}
-
 // The default checked look is a solid accent fill meant for glyphs which turn
 // white, which leaves File Explorer's colored icons hard to see. Selected
 // buttons get the subtle fill WinUI uses for selected list and navigation
@@ -8883,8 +9078,9 @@ mux::FrameworkElement SettingsWindow::BuildItemsPage() {
     page.Children().Append(MakePageHeader(
         L"Toolbar items",
         L"This is the File Explorer command bar with your settings. Click an "
-        L"item to edit it, or open a menu to pick one of its entries. Hidden "
-        L"built-in buttons can be shown again on the Built-in buttons page."));
+        L"item to edit it, or open a menu to pick one of its entries. Drag "
+        L"your items to reorder them. Hidden built-in buttons can be shown "
+        L"again on the Built-in buttons page."));
 
     m_previewHost = muxc::Border();
     if (m_cardStyle)
@@ -9104,18 +9300,28 @@ muxc::AppBarToggleButton SettingsWindow::MakePreviewItem(ActionItem const& item,
                                                          int index) {
     muxc::AppBarToggleButton button;
     ApplyPreviewSelectionStyle(button);
-    button.Label(item.labelText.empty() ? item.name : item.labelText);
+    bool isMenu = item.isMenu && !item.subItems.empty();
+    bool chevron = isMenu && m_model.showMenuChevrons;
+    std::wstring label = item.labelText.empty() ? item.name : item.labelText;
+    bool hasLabel = item.showLabel && !label.empty();
+    button.Label(chevron ? MenuButtonLabel(label, hasLabel, true) : label);
     if (auto icon = MakeCommandButtonIcon(item))
         button.Icon(icon);
-    button.LabelPosition(item.showLabel
+    button.LabelPosition(hasLabel || chevron
                              ? muxc::CommandBarLabelPosition::Default
                              : muxc::CommandBarLabelPosition::Collapsed);
-    if (!item.showLabel)
+    if (!item.showLabel && !chevron)
         MakeCompactPreviewButton(button);
     muxc::ToolTipService::SetToolTip(
         button, BoxString(item.name.empty() ? L"Untitled" : item.name));
+    if (chevron) {
+        button.Loaded([hasLabel, label](wf::IInspectable const& sender,
+                                        mux::RoutedEventArgs const&) {
+            if (auto element = sender.try_as<mux::FrameworkElement>())
+                AddChevronToLabel(element, hasLabel ? label : L"");
+        });
+    }
 
-    bool isMenu = item.isMenu && !item.subItems.empty();
     if (isMenu) {
         muxc::MenuFlyout menu;
         menu.Placement(
@@ -9126,6 +9332,8 @@ muxc::AppBarToggleButton SettingsWindow::MakePreviewItem(ActionItem const& item,
 
     button.Click([this, index, isMenu](wf::IInspectable const& sender,
                                        mux::RoutedEventArgs const&) {
+        if (IsDragClick())
+            return;
         SelectItem({index});
         if (isMenu) {
             if (auto element = sender.try_as<mux::FrameworkElement>())
@@ -9206,6 +9414,7 @@ void SettingsWindow::RebuildPreview() {
     auto appendBuiltIn = [&](int id, bool showLabel, bool chevron) {
         if (*BuiltInHiddenField(id))
             return;
+        showLabel = showLabel && !s.hideDefaultButtonLabels[id];
         primaryCommands.Append(MakePreviewBuiltIn(
             id, builtInIcon(id), builtInLabel(id), showLabel, chevron));
     };
@@ -9226,10 +9435,15 @@ void SettingsWindow::RebuildPreview() {
     auto customCommands =
         s.placeOnSecondaryBar ? secondaryCommands : primaryCommands;
     bool settingsItemAdded = !s.showSettingsItem;
+    std::vector<mux::UIElement> dragElements;
+    std::vector<int> dragOrder;
     auto appendSettingsItem = [&]() {
-        customCommands.Append(MakePreviewBuiltIn(
+        auto button = MakePreviewBuiltIn(
             kPreviewSettingsItemId, CreateGlyphIcon(L""),
-            BuiltInButtonName(kPreviewSettingsItemId), false, false));
+            BuiltInButtonName(kPreviewSettingsItemId), false, false);
+        customCommands.Append(button);
+        dragElements.push_back(button);
+        dragOrder.push_back(-1);
         settingsItemAdded = true;
     };
     m_previewItems.assign(s.items.size(), muxc::AppBarToggleButton{nullptr});
@@ -9242,12 +9456,21 @@ void SettingsWindow::RebuildPreview() {
             appendSettingsItem();
         m_previewItems[i] = MakePreviewItem(item, i);
         customCommands.Append(m_previewItems[i]);
+        dragElements.push_back(m_previewItems[i]);
+        dragOrder.push_back(i);
         if (item.separatorAfter)
             customCommands.Append(muxc::AppBarSeparator());
         itemPosition++;
     }
     if (!settingsItemAdded)
         appendSettingsItem();
+    SetDragGroup(kDragGroupPreview,
+                 s.placeOnSecondaryBar ? mux::UIElement(secondary)
+                                       : mux::UIElement(primary),
+                 std::move(dragElements),
+                 [this, dragOrder](int from, int to) {
+                     ReorderToolbarItems(dragOrder, from, to);
+                 });
 
     if (s.contextMenuItem.enabled) {
         primaryCommands.Append(MakePreviewButton(
@@ -9264,7 +9487,8 @@ void SettingsWindow::RebuildPreview() {
     if (!s.hideDetailsButton) {
         secondaryCommands.Append(MakePreviewBuiltIn(
             kPreviewDetailsId, svgOrGlyphIcon(detailsLook.iconUri, L""),
-            BuiltInButtonName(kPreviewDetailsId), true, false));
+            BuiltInButtonName(kPreviewDetailsId), !s.hideDetailsButtonLabel,
+            false));
     }
 
     StyleCardCommandBar(primary);
@@ -9357,11 +9581,13 @@ muxc::AppBarToggleButton SettingsWindow::MakePreviewBuiltIn(
         button.Loaded([label](wf::IInspectable const& sender,
                               mux::RoutedEventArgs const&) {
             if (auto element = sender.try_as<mux::FrameworkElement>())
-                AddLabelChevron(element, label);
+                AddChevronToLabel(element, label);
         });
     }
     button.Click(
         [this, id](wf::IInspectable const&, mux::RoutedEventArgs const&) {
+            if (IsDragClick())
+                return;
             SelectBuiltIn(id);
         });
 
@@ -9450,6 +9676,34 @@ void SettingsWindow::BuildBuiltInEditor() {
                              L"Explorer and from the preview above. It can be "
                              L"shown again on the Built-in buttons page.",
                              toggle, false));
+
+    bool* labelHidden = nullptr;
+    if (id == kPreviewDetailsId) {
+        labelHidden = &m_model.hideDetailsButtonLabel;
+    } else if (std::find(std::begin(kLabeledDefaultButtons),
+                         std::end(kLabeledDefaultButtons),
+                         id) != std::end(kLabeledDefaultButtons)) {
+        labelHidden = &m_model.hideDefaultButtonLabels[id];
+    }
+    if (labelHidden) {
+        muxc::ToggleSwitch labelToggle;
+        labelToggle.IsOn(!*labelHidden);
+        labelToggle.MinWidth(0);
+        labelToggle.Toggled([this, labelHidden, generation](
+                                wf::IInspectable const& sender,
+                                mux::RoutedEventArgs const&) {
+            if (generation != m_editorGeneration)
+                return;
+            *labelHidden = !sender.as<muxc::ToggleSwitch>().IsOn();
+            RebuildPreview();
+            OnModelChanged();
+        });
+        children.Append(MakeCard(L"", L"Show label",
+                                 L"When it's off, only the icon of the button "
+                                 L"is shown, and the label becomes its "
+                                 L"tooltip.",
+                                 labelToggle, false));
+    }
 
     muxc::HyperlinkButton allButtonsLink;
     allButtonsLink.Content(
@@ -9543,6 +9797,7 @@ void SettingsWindow::BuildItemEditor() {
         return;
     m_editorGeneration++;
     m_editorIconPreview = nullptr;
+    ClearDragGroup(kDragGroupEntries);
     auto children = m_editorPanel.Children();
     children.Clear();
 
@@ -9944,7 +10199,14 @@ void SettingsWindow::BuildItemEditor() {
             header.Margin({1, 28, 0, 8});
         }
         children.Append(header);
+        if (item->subItems.size() > 1) {
+            auto hint = MakeText(L"Drag the entries to reorder them.",
+                                 m_secondaryTextStyle);
+            hint.Margin({1, -4, 0, 8});
+            children.Append(hint);
+        }
 
+        std::vector<mux::UIElement> entryButtons;
         for (int i = 0; i < (int)item->subItems.size(); i++) {
             auto const& entry = item->subItems[i];
             std::vector<int> entryPath = path;
@@ -9986,12 +10248,19 @@ void SettingsWindow::BuildItemEditor() {
             entryButton.Padding({16, 10, 16, 10});
             entryButton.Margin({0, 0, 0, 4});
             entryButton.Click(
-                [deferSelect, entryPath](wf::IInspectable const&,
-                                         mux::RoutedEventArgs const&) {
+                [this, deferSelect, entryPath](wf::IInspectable const&,
+                                               mux::RoutedEventArgs const&) {
+                    if (IsDragClick())
+                        return;
                     deferSelect(entryPath);
                 });
             children.Append(entryButton);
+            entryButtons.push_back(entryButton);
         }
+        SetDragGroup(kDragGroupEntries, m_editorPanel, std::move(entryButtons),
+                     [this, path](int from, int to) {
+                         ReorderMenuEntries(path, from, to);
+                     });
 
         auto addEntryButton = MakeTextButton(L"Add entry");
         addEntryButton.Margin({0, 4, 0, 0});
@@ -10002,6 +10271,334 @@ void SettingsWindow::BuildItemEditor() {
         });
         children.Append(addEntryButton);
     }
+}
+
+// How far the pointer has to move before a press becomes a drag.
+constexpr double kDragThreshold = 6;
+
+void SettingsWindow::SetDragGroup(int group,
+                                  mux::UIElement const& reference,
+                                  std::vector<mux::UIElement> elements,
+                                  std::function<void(int, int)> commit) {
+    ClearDragGroup(group);
+    auto& state = m_dragGroups[group];
+    state.reference = reference;
+    state.elements = std::move(elements);
+    state.commit = std::move(commit);
+    for (int i = 0; i < (int)state.elements.size(); i++)
+        EnableDragReorder(state.elements[i], group, i);
+}
+
+void SettingsWindow::ClearDragGroup(int group) {
+    if (m_drag.group == group)
+        m_drag = DragState{};
+    m_dragGroups[group] = DragGroupState{};
+}
+
+void SettingsWindow::EnableDragReorder(mux::UIElement const& element,
+                                       int group,
+                                       int slot) {
+    using mux::Input::PointerEventHandler;
+    using mux::Input::PointerRoutedEventArgs;
+
+    // Buttons handle the pointer events themselves, so the handlers are
+    // added for handled events too.
+    auto add = [&element](mux::RoutedEvent const& routedEvent,
+                          auto&& callback) {
+        PointerEventHandler handler(callback);
+        element.AddHandler(routedEvent, winrt::box_value(handler), true);
+    };
+    add(mux::UIElement::PointerPressedEvent(),
+        [this, group, slot](wf::IInspectable const& sender,
+                            PointerRoutedEventArgs const& args) {
+            if (auto element = sender.try_as<mux::UIElement>())
+                OnDragPointerPressed(element, args, group, slot);
+        });
+    add(mux::UIElement::PointerMovedEvent(),
+        [this, group, slot](wf::IInspectable const& sender,
+                            PointerRoutedEventArgs const& args) {
+            if (auto element = sender.try_as<mux::UIElement>())
+                OnDragPointerMoved(element, args, group, slot);
+        });
+    add(mux::UIElement::PointerReleasedEvent(),
+        [this](wf::IInspectable const&, PointerRoutedEventArgs const&) {
+            EndDrag(true);
+        });
+    // Buttons release the capture when the button is released, which can
+    // come before the released event.
+    add(mux::UIElement::PointerCaptureLostEvent(),
+        [this](wf::IInspectable const&, PointerRoutedEventArgs const&) {
+            EndDrag(true);
+        });
+    add(mux::UIElement::PointerCanceledEvent(),
+        [this](wf::IInspectable const&, PointerRoutedEventArgs const&) {
+            EndDrag(false);
+        });
+}
+
+void SettingsWindow::OnDragPointerPressed(
+    mux::UIElement const& element,
+    mux::Input::PointerRoutedEventArgs const& args,
+    int group,
+    int slot) {
+    auto const& state = m_dragGroups[group];
+    if (!state.reference || slot >= (int)state.elements.size() ||
+        state.elements[slot] != element) {
+        return;
+    }
+    auto point = args.GetCurrentPoint(state.reference);
+    if (!point.Properties().IsLeftButtonPressed())
+        return;
+
+    if (m_drag.active)
+        EndDrag(false);
+    m_drag = DragState{};
+    m_drag.pressed = true;
+    m_drag.group = group;
+    m_drag.slot = slot;
+    m_drag.target = slot;
+    m_drag.pointerId = args.Pointer().PointerId();
+    m_drag.pressPoint = point.Position();
+}
+
+void SettingsWindow::OnDragPointerMoved(
+    mux::UIElement const& element,
+    mux::Input::PointerRoutedEventArgs const& args,
+    int group,
+    int slot) {
+    if (!m_drag.pressed || m_drag.group != group || m_drag.slot != slot ||
+        m_drag.pointerId != args.Pointer().PointerId()) {
+        return;
+    }
+    auto const& state = m_dragGroups[group];
+    if (!state.reference)
+        return;
+
+    auto point = args.GetCurrentPoint(state.reference);
+    if (!point.Properties().IsLeftButtonPressed()) {
+        EndDrag(true);
+        return;
+    }
+
+    auto position = point.Position();
+    bool vertical = group == kDragGroupEntries;
+    double delta = vertical ? position.Y - m_drag.pressPoint.Y
+                            : position.X - m_drag.pressPoint.X;
+    if (!m_drag.active) {
+        if (std::abs(delta) < kDragThreshold)
+            return;
+        if (!BeginDrag(element, args)) {
+            m_drag = DragState{};
+            return;
+        }
+    }
+    UpdateDrag(delta);
+}
+
+bool SettingsWindow::BeginDrag(mux::UIElement const& element,
+                               mux::Input::PointerRoutedEventArgs const& args) {
+    auto const& state = m_dragGroups[m_drag.group];
+    if (state.elements.size() < 2)
+        return false;
+
+    bool vertical = m_drag.group == kDragGroupEntries;
+    m_drag.starts.clear();
+    m_drag.sizes.clear();
+    try {
+        for (auto const& item : state.elements) {
+            auto frameworkElement = item.try_as<mux::FrameworkElement>();
+            if (!frameworkElement)
+                return false;
+            auto origin = item.TransformToVisual(state.reference)
+                              .TransformPoint(wf::Point{0, 0});
+            m_drag.starts.push_back(vertical ? origin.Y : origin.X);
+            m_drag.sizes.push_back(vertical ? frameworkElement.ActualHeight()
+                                            : frameworkElement.ActualWidth());
+        }
+    } catch (...) {
+        Wh_Log(L"Error %08X", winrt::to_hresult().value);
+        return false;
+    }
+
+    m_drag.active = true;
+    element.CapturePointer(args.Pointer());
+    muxc::Canvas::SetZIndex(element, 1);
+    element.Opacity(0.85);
+    return true;
+}
+
+void SettingsWindow::UpdateDrag(double delta) {
+    auto const& state = m_dragGroups[m_drag.group];
+    auto const& starts = m_drag.starts;
+    auto const& sizes = m_drag.sizes;
+    int count = (int)state.elements.size();
+    int from = m_drag.slot;
+    if (count != (int)starts.size() || from < 0 || from >= count)
+        return;
+    bool vertical = m_drag.group == kDragGroupEntries;
+
+    // The dragged element stays between the first and the last one.
+    double minDelta = starts[0] - starts[from];
+    double maxDelta =
+        starts[count - 1] + sizes[count - 1] - (starts[from] + sizes[from]);
+    delta = std::clamp(delta, std::min(minDelta, 0.0), std::max(maxDelta, 0.0));
+
+    double center = starts[from] + sizes[from] / 2 + delta;
+    int target = 0;
+    for (int i = 0; i < count; i++) {
+        if (i != from && starts[i] + sizes[i] / 2 < center)
+            target++;
+    }
+
+    // The others make room for it, by its size and the gap between items.
+    double gap = 0;
+    if (from + 1 < count)
+        gap = starts[from + 1] - (starts[from] + sizes[from]);
+    else if (from > 0)
+        gap = starts[from] - (starts[from - 1] + sizes[from - 1]);
+    double extent = sizes[from] + std::clamp(gap, 0.0, 8.0);
+
+    for (int i = 0; i < count; i++) {
+        double offset = 0;
+        if (i == from)
+            offset = delta;
+        else if (from < i && i <= target)
+            offset = -extent;
+        else if (target <= i && i < from)
+            offset = extent;
+
+        auto const& element = state.elements[i];
+        auto transform =
+            element.RenderTransform().try_as<muxm::TranslateTransform>();
+        if (!transform) {
+            if (offset == 0)
+                continue;
+            transform = muxm::TranslateTransform();
+            element.RenderTransform(transform);
+        }
+        if (vertical)
+            transform.Y(offset);
+        else
+            transform.X(offset);
+    }
+    m_drag.target = target;
+}
+
+void SettingsWindow::ResetDragVisuals(int group) {
+    for (auto const& element : m_dragGroups[group].elements) {
+        try {
+            element.RenderTransform(nullptr);
+            element.Opacity(1);
+            muxc::Canvas::SetZIndex(element, 0);
+        } catch (...) {
+        }
+    }
+}
+
+void SettingsWindow::EndDrag(bool commit) {
+    if (!m_drag.pressed)
+        return;
+    DragState drag = std::move(m_drag);
+    m_drag = DragState{};
+    if (!drag.active)
+        return;
+
+    ResetDragVisuals(drag.group);
+
+    // The button may still raise its click when released, which is ignored
+    // until the queued work below runs.
+    m_suppressDragClick = true;
+    std::function<void(int, int)> commitFn;
+    if (commit && drag.target != drag.slot)
+        commitFn = m_dragGroups[drag.group].commit;
+
+    auto dispatcherQueue = mud::DispatcherQueue::GetForCurrentThread();
+    if (!dispatcherQueue) {
+        m_suppressDragClick = false;
+        return;
+    }
+    dispatcherQueue.TryEnqueue(
+        [this, commitFn, from = drag.slot, to = drag.target]() {
+            if (g_settingsWindow != this)
+                return;
+            m_suppressDragClick = false;
+            if (commitFn)
+                commitFn(from, to);
+            else
+                UpdatePreviewSelection();
+        });
+}
+
+// The order lists the item index of each dragged element, or -1 for the
+// settings item, whose position is kept in its order setting.
+void SettingsWindow::ReorderToolbarItems(std::vector<int> order,
+                                         int from,
+                                         int to) {
+    int count = (int)order.size();
+    if (from < 0 || from >= count || to < 0 || to >= count)
+        return;
+    int moved = order[from];
+    order.erase(order.begin() + from);
+    order.insert(order.begin() + to, moved);
+
+    auto& items = m_model.items;
+    std::vector<ActionItem> reordered;
+    std::vector<int> newIndexOf(items.size(), -1);
+    int settingsPosition = -1;
+    for (int index : order) {
+        if (index < 0) {
+            settingsPosition = (int)reordered.size();
+            continue;
+        }
+        if (index >= (int)items.size() || newIndexOf[index] >= 0)
+            continue;
+        newIndexOf[index] = (int)reordered.size();
+        reordered.push_back(items[index]);
+    }
+    int toolbarItemCount = (int)reordered.size();
+    // Empty items aren't shown, they stay last.
+    for (int i = 0; i < (int)items.size(); i++) {
+        if (newIndexOf[i] < 0) {
+            newIndexOf[i] = (int)reordered.size();
+            reordered.push_back(items[i]);
+        }
+    }
+    items = std::move(reordered);
+
+    if (settingsPosition >= 0) {
+        m_model.settingsItemOrder =
+            settingsPosition >= toolbarItemCount ? -1 : settingsPosition;
+    }
+
+    if (moved >= 0) {
+        m_selectedBuiltIn = -1;
+        m_selectedPath = {newIndexOf[moved]};
+    } else {
+        m_selectedBuiltIn = kPreviewSettingsItemId;
+        m_selectedPath.clear();
+    }
+    RefreshItemsPage();
+    OnModelChanged();
+}
+
+void SettingsWindow::ReorderMenuEntries(std::vector<int> const& parentPath,
+                                        int from,
+                                        int to) {
+    ActionItem* parent = ItemAt(parentPath);
+    if (!parent)
+        return;
+    auto& entries = parent->subItems;
+    int count = (int)entries.size();
+    if (from < 0 || from >= count || to < 0 || to >= count || from == to)
+        return;
+    ActionItem moved = std::move(entries[from]);
+    entries.erase(entries.begin() + from);
+    entries.insert(entries.begin() + to, std::move(moved));
+
+    m_selectedBuiltIn = -1;
+    m_selectedPath = parentPath;
+    RefreshItemsPage();
+    OnModelChanged();
 }
 
 void SettingsWindow::AddTopLevelItem(bool isMenu) {
