@@ -2,7 +2,7 @@
 // @id              chrome-context-menu-items
 // @name            Chrome Context Menu Items
 // @description     Hide, add, group, and reorder Chrome context menu items, restyle Chrome's menus, and tweak tabs and extension buttons
-// @version         1.0.0
+// @version         1.1.0
 // @author          DanRotaru
 // @github          https://github.com/DanRotaru
 // @homepage        https://dan13.me/
@@ -210,6 +210,9 @@
     $description: Enter six HEX digits with or without # (for example, #606060). Invalid values use #606060. The border stays solid when background transparency is enabled.
   $name: Themes
 - hideContextMenuItems:
+  - hideNavigation: false
+    $name: Hide Back, Forward and Reload
+    $description: Hides the page navigation entries at the top of the page context menu. Keyboard shortcuts and toolbar buttons keep working.
   - hideAskGemini: true
     $name: Hide Ask Gemini
     $description: Hides Gemini's page and selected-text context-menu entry.
@@ -243,6 +246,34 @@
     $name: Hide Open link in split view
   - hideSearchImageWithGoogleLens: true
     $name: Hide Search image with Google Lens
+  - hideSearchWebFor: false
+    $name: Hide Search Google for "..."
+    $description: Hides the selected-text web search entry for any search engine, in the current or a new tab.
+  - hideCopyLinkToHighlight: false
+    $name: Hide Copy link to highlight
+    $description: Also hides Recopy link to highlight and Remove highlight.
+  - hideOpenLinkInNewWindow: false
+    $name: Hide Open link in new window / incognito window
+  - hideOpenLinkInProfile: false
+    $name: Hide Open link as / in other profile
+    $description: Hides the single-profile entry and the profile submenu.
+  - hidePictureInPicture: false
+    $name: Hide Picture in picture
+  - hideMediaLoopControls: false
+    $name: Hide Loop and Show controls
+    $description: Hides the media toggles shown on video and audio elements.
+  - hideEmoji: false
+    $name: Hide Emoji
+    $description: Hides the emoji entry in text fields. Win+. keeps working.
+  - hideSpellCheck: false
+    $name: Hide Spell check and Writing direction
+    $description: Hides the spell-check options and writing direction submenus in text fields. Spelling suggestions for a misspelled word stay visible.
+  - hidePasswordsAutofill: false
+    $name: Hide Password manager and Autofill entries
+    $description: Hides password, passkey, autofill and autofill feedback entries in form fields.
+  - hideInspect: false
+    $name: Hide Inspect
+    $description: Hides Inspect and Inspect background page. Ctrl+Shift+I and F12 keep working.
   - hideIcons: false
     $name: Hide menu item icons
     $description: Hides leading icons in the enabled menu families. Reopen menus after changing. Checkmarks and submenu arrows remain visible.
@@ -386,10 +417,15 @@ Designed for 64-bit Chrome on Windows.
 
 ## Features
 
-- **Hide built-in items** - individually hide Ask Gemini, Print, Cast, Save page
+- **Hide built-in items** - individually hide Back / Forward / Reload (one
+  toggle), Ask Gemini, Print, Cast, Save page
   as, Open in reading mode, Search with Google Lens, Send to your devices, Create
   QR Code, Translate, Translate selection, View page source, Save link as, Open
-  link in split view and Search image with Google Lens.
+  link in split view and Search image with Google Lens. Optional toggles (off by
+  default) also cover Search Google for, Copy link to highlight, Open link in new
+  / incognito window, Open link as another profile, Picture in picture, Loop /
+  Show controls, Emoji, Spell check / Writing direction, Password manager /
+  Autofill entries and Inspect.
 - **Hide by label** - hide any page menu entry whose label contains a piece of
   text, ignoring case. Works for Chrome commands, extension entries, submenus and
   your own items (up to 64 rules).
@@ -438,8 +474,8 @@ Out of the box the mod:
   transparency is off.
 * Hides Ask Gemini, Print, Cast, Save page as, Open in reading mode, Search with
   Google Lens, Send to your devices, Create QR Code, both Translate entries, Open
-  link in split view and Search image with Google Lens. *View page source* and
-  *Save link as* stay visible.
+  link in split view and Search image with Google Lens. *Back / Forward /
+  Reload*, *View page source* and *Save link as* stay visible.
 * Hides icons in the main page right-click menu and keyboard shortcut labels.
 * Groups extension commands into an **Extensions** submenu, second-last.
 * Adds no custom commands and leaves tabs and extension buttons at Chrome's
@@ -477,7 +513,8 @@ setup is complete.
 * The tab, extension button and menu font / spacing / corner radius options
   overlap with Chrome Native UI Tweaks. If you use both mods, configure each of
   those options in one mod only and leave it at Chrome default in the other.
-* Thanks to Dron007, this mod started from it.
+* This mod started from [Chrome Native UI Tweaks](https://windhawk.net/mods/chrome-native-ui-tweaks)
+  by Dron007 - thanks!
 */
 // ==/WindhawkModReadme==
 // clang-format on
@@ -957,10 +994,15 @@ static std::atomic_int g_menuVerticalSpacing = -1;
 struct ContextMenuVisibilitySetting {
   PCWSTR setting;
   int commandId;
+  // Inclusive end of a command ID range; 0 matches commandId only.
+  int commandIdLast = 0;
   std::atomic_bool hidden{false};
 };
 
 static ContextMenuVisibilitySetting g_contextMenuVisibility[] = {
+    {L"hideContextMenuItems.hideNavigation", 33000},  // IDC_BACK
+    {L"hideContextMenuItems.hideNavigation", 33001},  // IDC_FORWARD
+    {L"hideContextMenuItems.hideNavigation", 33002},  // IDC_RELOAD
     {L"hideContextMenuItems.hideAskGemini", 50234},   // IDC_CONTENT_CONTEXT_GLIC
     {L"hideContextMenuItems.hidePrint", 35003},       // IDC_PRINT
     {L"hideContextMenuItems.hideCast", 35011},        // IDC_ROUTE_MEDIA
@@ -975,6 +1017,33 @@ static ContextMenuVisibilitySetting g_contextMenuVisibility[] = {
     {L"hideContextMenuItems.hideSaveLinkAs", 50103},   // IDC_CONTENT_CONTEXT_SAVELINKAS
     {L"hideContextMenuItems.hideOpenLinkInSplitView", 50111}, // IDC_CONTENT_CONTEXT_OPENLINKSPLITVIEW
     {L"hideContextMenuItems.hideSearchImageWithGoogleLens", 50127}, // IDC_CONTENT_CONTEXT_SEARCHLENSFORIMAGE
+    {L"hideContextMenuItems.hideSearchWebFor", 50191},        // IDC_CONTENT_CONTEXT_SEARCHWEBFOR
+    {L"hideContextMenuItems.hideSearchWebFor", 50192},        // IDC_CONTENT_CONTEXT_SEARCHWEBFORNEWTAB
+    {L"hideContextMenuItems.hideCopyLinkToHighlight", 50158}, // IDC_CONTENT_CONTEXT_COPYLINKTOTEXT
+    {L"hideContextMenuItems.hideCopyLinkToHighlight", 50159}, // IDC_CONTENT_CONTEXT_RESHARELINKTOTEXT
+    {L"hideContextMenuItems.hideCopyLinkToHighlight", 50160}, // IDC_CONTENT_CONTEXT_REMOVELINKTOTEXT
+    {L"hideContextMenuItems.hideOpenLinkInNewWindow", 50101}, // IDC_CONTENT_CONTEXT_OPENLINKNEWWINDOW
+    {L"hideContextMenuItems.hideOpenLinkInNewWindow", 50102}, // IDC_CONTENT_CONTEXT_OPENLINKOFFTHERECORD
+    {L"hideContextMenuItems.hideOpenLinkInProfile", 50108},   // IDC_CONTENT_CONTEXT_OPENLINKINPROFILE (submenu)
+    // IDC_OPEN_LINK_IN_PROFILE_FIRST..LAST (kMaxOpenLinkInProfileItems = 100)
+    {L"hideContextMenuItems.hideOpenLinkInProfile", 52300, 52399},
+    {L"hideContextMenuItems.hidePictureInPicture", 50137},    // IDC_CONTENT_CONTEXT_PICTUREINPICTURE
+    {L"hideContextMenuItems.hideMediaLoopControls", 50140},   // IDC_CONTENT_CONTEXT_LOOP
+    {L"hideContextMenuItems.hideMediaLoopControls", 50141},   // IDC_CONTENT_CONTEXT_CONTROLS
+    {L"hideContextMenuItems.hideEmoji", 50220},               // IDC_CONTENT_CONTEXT_EMOJI
+    {L"hideContextMenuItems.hideSpellCheck", 57329},          // IDC_SPELLCHECK_MENU
+    {L"hideContextMenuItems.hideSpellCheck", 57328},          // IDC_WRITING_DIRECTION_MENU
+    {L"hideContextMenuItems.hidePasswordsAutofill", 52990},   // IDC_CONTENT_CONTEXT_AUTOFILL_FEEDBACK
+    {L"hideContextMenuItems.hidePasswordsAutofill", 52998},   // ..._AUTOFILL_FALLBACK_PASSWORDS_SELECT_PASSWORD
+    {L"hideContextMenuItems.hidePasswordsAutofill", 52999},   // ..._AUTOFILL_FALLBACK_PASSWORDS_IMPORT_PASSWORDS
+    {L"hideContextMenuItems.hidePasswordsAutofill", 53000},   // ..._AUTOFILL_FALLBACK_PASSWORDS_SUGGEST_PASSWORD
+    {L"hideContextMenuItems.hidePasswordsAutofill", 53002},   // ..._AUTOFILL_FALLBACK_PASSWORDS_USE_PASSKEY_FROM_ANOTHER_DEVICE
+    {L"hideContextMenuItems.hidePasswordsAutofill", 53003},   // IDC_CONTENT_CONTEXT_AUTOFILL_FALLBACK_AT_MEMORY
+    {L"hideContextMenuItems.hidePasswordsAutofill", 50176},   // IDC_CONTENT_CONTEXT_GENERATEPASSWORD (older builds)
+    {L"hideContextMenuItems.hidePasswordsAutofill", 50178},   // IDC_CONTENT_CONTEXT_SHOWALLSAVEDPASSWORDS (older builds)
+    {L"hideContextMenuItems.hidePasswordsAutofill", 57341},   // IDC_PASSWORDS_AND_AUTOFILL_MENU
+    {L"hideContextMenuItems.hideInspect", 50162},             // IDC_CONTENT_CONTEXT_INSPECTELEMENT
+    {L"hideContextMenuItems.hideInspect", 50171},             // IDC_CONTENT_CONTEXT_INSPECTBACKGROUNDPAGE
 };
 static std::atomic_int g_menuCornerRadius = -1;
 // 100 bypasses the extra paint layer entirely (disabled/default).
@@ -1956,7 +2025,9 @@ static bool ContextMenuIsCommandIdVisibleHook(const void* self, int commandId) {
   if (IsCustomMenuCommandId(commandId)) return true;
 
   for (const auto& item : g_contextMenuVisibility) {
-    if (item.commandId == commandId && item.hidden.load(std::memory_order_relaxed)) {
+    const int last = item.commandIdLast ? item.commandIdLast : item.commandId;
+    if (commandId >= item.commandId && commandId <= last &&
+        item.hidden.load(std::memory_order_relaxed)) {
       return false;
     }
   }
