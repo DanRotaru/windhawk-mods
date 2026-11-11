@@ -255,8 +255,13 @@ The **Icon glyph or icon path** field accepts several forms:
 
 ## Built-in button order
 
-The **Built-in button order** setting puts File Explorer's own buttons in the
-order you list them, separated by commas, with `|` where a separator goes:
+In the settings window, drag File Explorer's own buttons, and the separators
+between them, in the command bar preview to reorder them, the same way as your
+own items. Selecting one of them shows a **Reset order** button.
+
+In Windhawk's settings, the **Built-in button order** setting holds the same
+order as text: the buttons separated by commas, with `|` where a separator
+goes:
 
 ```
 sort, view | new | cut, copy, paste, rename, share, delete
@@ -7361,15 +7366,6 @@ std::vector<SettingsPageDef> DescribeSettingsPages(EditableSettings& s) {
                   L"\uE712", true),
         BoolField(L"hideDefaultButtons.details", L"Details pane toggle", L"",
                   &s.hideDetailsButton, L"\uE946", true),
-        HeaderField(L"Order"),
-        StringField(L"defaultButtonOrder", L"Built-in button order",
-                    L"The buttons separated by commas, with | for a "
-                    L"separator, e.g. sort, view | new | cut, copy, paste, "
-                    L"rename, share, delete. Names: new, cut, copy, paste, "
-                    L"rename, share, delete, sort, view. Buttons which aren't "
-                    L"listed come last. Leave empty for File Explorer's own "
-                    L"order.",
-                    &s.defaultButtonOrder, true, L"\uE8CB"),
         HeaderField(L"Labels"),
         labelField(kNewButtonIndex),
         labelField(kSortButtonIndex),
@@ -7613,6 +7609,10 @@ void AppendItemEntries(std::vector<RegEntry>& entries,
 
 std::vector<RegEntry> BuildRegEntries(EditableSettings& settings) {
     std::vector<RegEntry> entries;
+    // Edited by dragging the built-in buttons in the preview, so it isn't
+    // one of the fields of the settings pages.
+    entries.push_back(
+        StringEntry(L"defaultButtonOrder", settings.defaultButtonOrder));
     int index = 0;
     for (auto const& item : settings.items) {
         if (IsEmptyActionItem(item))
@@ -8674,6 +8674,12 @@ bool ImportSettingsText(std::wstring const& text,
                     break;
             }
         }
+    }
+
+    if (root.count(L"defaultButtonOrder")) {
+        recognized++;
+        settings->defaultButtonOrder =
+            FlatSettingString(root, L"defaultButtonOrder");
     }
 
     std::vector<ActionItem> items;
@@ -10596,6 +10602,25 @@ void SettingsWindow::BuildBuiltInEditor() {
                                  L"is shown, and the label becomes its "
                                  L"tooltip.",
                                  labelToggle, false));
+    }
+
+    if (id >= 0 && id < kReorderableButtonCount) {
+        auto resetButton = MakeTextButton(L"Reset order");
+        resetButton.IsEnabled(!m_model.defaultButtonOrder.empty());
+        resetButton.Click([this, generation](wf::IInspectable const&,
+                                             mux::RoutedEventArgs const&) {
+            if (generation != m_editorGeneration)
+                return;
+            m_model.defaultButtonOrder.clear();
+            RefreshItemsPage();
+            OnModelChanged();
+        });
+        children.Append(MakeCard(
+            L"", L"Order",
+            L"Drag the built-in buttons and their separators in the preview "
+            L"above to reorder them. Reset puts them back in File Explorer's "
+            L"own order.",
+            resetButton, false));
     }
 
     muxc::HyperlinkButton allButtonsLink;
