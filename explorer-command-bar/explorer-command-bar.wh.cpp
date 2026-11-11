@@ -126,8 +126,8 @@ The following placeholders can be used in an item's parameters:
 * `%p%` / `%parent%` - parent folder path of the active tab.
 * `%%` - literal percent sign escape.
 
-Wrap placeholders in quotes if desired (e.g. `-d "%path%"` or `"%sel%"`). 
-If a used placeholder has no value (nothing selected, or a non-filesystem location like *This PC*), the command is launched without any parameters. 
+Wrap placeholders in quotes if desired (e.g. `-d "%path%"` or `"%sel%"`).
+If a used placeholder has no value (nothing selected, or a non-filesystem location like *This PC*), the command is launched without any parameters.
 Commands run with the active tab's folder as their working directory.
 
 ---
@@ -395,7 +395,7 @@ File Explorer report the island's XAML root to a hooked handler.
     - matchExtensions: ""
       $name: "File extension filter"
       $description: >-
-        Comma-separated rules evaluate using OR logic. Use '+' for AND (e.g. files + single). 
+        Comma-separated rules evaluate using OR logic. Use '+' for AND (e.g. files + single).
         Prefix with '-' to exclude. Use 'files', 'folders', 'single', 'multi', 'only txt', or 'hide'.
     - iconGlyph: ""
       $name: Icon glyph or icon path
@@ -475,7 +475,7 @@ File Explorer report the island's XAML root to a hooked handler.
               $name: Keyboard shortcut
               $description: >-
                 Runs the menu item when the keys are pressed in a File
-                Explorer window, e.g. Ctrl+Shift+T.    
+                Explorer window, e.g. Ctrl+Shift+T.
             - iconGlyph: ""
               $name: Icon glyph or icon path
               $description: >-
