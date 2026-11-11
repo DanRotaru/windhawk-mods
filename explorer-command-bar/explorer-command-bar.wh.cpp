@@ -43,7 +43,7 @@ Explorer.
   (all selected paths quoted and space-separated), and `%sel_each%` (launches
   one process instance per selected file).
 - **Internal commands** - Execute native explorer actions like `internal:TogglePreview`,
-  `internal:ToggleDetails`, and `internal:FolderOptions`.
+  `internal:CopyPath`, `internal:NewFolder` and `internal:Refresh`.
 - **Secondary Command Bar docking** - Optionally dock custom buttons onto the
   right-side command bar to preserve primary toolbar space.
 - **Flexible icons** - light and dark theme pairs (`Light | Dark`), a Segoe Fluent
@@ -54,6 +54,10 @@ Explorer.
   menu, the contextual commands (Set as background, Rotate left, Rotate right,
   Extract all) and the Details pane toggle. The labels of New, Sort, View and
   the Details pane toggle can be hidden too, leaving only their icons.
+- **Reorder built-in buttons** - put New, Cut, Copy, Paste, Rename, Share,
+  Delete, Sort and View in any order, with separators where you want them.
+- **Run as administrator & window style** - start any item elevated, or
+  minimized, maximized or hidden.
 - **Replace New with New+** - turn Explorer's New button into a *New+* button
   which lists the templates of the
   [PowerToys **New+**](https://learn.microsoft.com/en-us/windows/powertoys/newplus)
@@ -151,6 +155,37 @@ Instead of an executable, the **Command** field can run built-in File Explorer a
 * `internal:ToggleDetails` - toggles the Details pane.
 * `internal:OpenWith` - opens the native Windows "How do you want to open this file?" application chooser dialog for the selected file.
 * `internal:FolderOptions` - opens the classic Folder Options control panel dialog.
+* `internal:CopyPath` - copies the full paths of the selected items to the
+  clipboard, one per line, or the current folder's path if nothing is
+  selected.
+* `internal:CopyName` - copies the names of the selected items, one per line,
+  or the current folder's name if nothing is selected.
+* `internal:CopyDir` - copies the path of the current folder.
+* `internal:NewFolder` - creates a new folder in the current folder, selected
+  and ready to be renamed.
+* `internal:NewFile` - creates a new empty file the same way.
+* `internal:Refresh` - refreshes the current folder.
+
+For `NewFolder` and `NewFile`, the **Parameters** field sets the name, e.g.
+`Notes $YYYY-$MM-$DD.md` (the [filename variables](#filename-variables) of
+New+ can be used). If it's empty, the name is `New folder` or `file` (without
+an extension), and
+` (2)`, ` (3)`, … is appended if the name is taken. Both can be undone with
+Ctrl+Z.
+
+---
+
+## Launch options
+
+Each button and menu entry which runs a program has two more options:
+
+* **Run as administrator** - starts the command elevated, after a UAC prompt.
+  Holding **Ctrl+Shift** while clicking an item does the same for any item,
+  like in the Start menu and the taskbar.
+* **Window style** - `Normal`, `Minimized`, `Maximized` or `Hidden`. Hidden is
+  meant for console commands and scripts which shouldn't leave a window
+  behind, e.g. `cmd.exe` with `/c npm run build`. Some programs ignore the
+  window style.
 
 ---
 
@@ -215,6 +250,29 @@ The **Icon glyph or icon path** field accepts several forms:
 * **Empty** - the icon is extracted from the command's executable (app
   execution aliases such as `wt.exe` are resolved to their real target).
 * **Hide icon** - enable the toggle to show no icon at all.
+
+---
+
+## Built-in button order
+
+The **Built-in button order** setting puts File Explorer's own buttons in the
+order you list them, separated by commas, with `|` where a separator goes:
+
+```
+sort, view | new | cut, copy, paste, rename, share, delete
+```
+
+The names are `new`, `cut`, `copy`, `paste`, `rename`, `share`, `delete`,
+`sort` and `view`. Buttons which aren't listed come last, in their usual order,
+and an empty setting keeps File Explorer's own order. The New+ button moves
+along with New.
+
+File Explorer has two separators among these buttons, so the first two `|` are
+used. The *Vertical separator after New / Delete* toggles still apply to a
+separator placed right after New or Delete, and any other separator is hidden
+along with the buttons after it once none of them is shown. The contextual
+commands (Rotate, Extract all, …) aren't reordered, since they come and go with
+the selection.
 
 ---
 
@@ -376,7 +434,10 @@ File Explorer report the island's XAML root to a hooked handler.
         The executable to run. For dropdown menus it's only used as an icon
         source. Alternatively, an internal command with the internal: or int:
         prefix (case-insensitive): internal:TogglePreview,
-        internal:ToggleDetails, internal:FolderOptions or internal:OpenWith.
+        internal:ToggleDetails, internal:FolderOptions, internal:OpenWith,
+        internal:CopyPath, internal:CopyName, internal:CopyDir,
+        internal:NewFolder, internal:NewFile or internal:Refresh. For
+        NewFolder and NewFile, the parameters set the name.
     - parameters: -d "%path%"
       $name: Parameters
       $description: >-
@@ -392,6 +453,21 @@ File Explorer report the island's XAML root to a hooked handler.
         Runs the item, like a click, when the keys are pressed in a File
         Explorer window, e.g. Ctrl+Shift+T, Alt+N or F9. Needs Ctrl, Alt or
         Win unless the key is F1-F24. Not used for dropdown menus.
+    - runAsAdmin: false
+      $name: Run as administrator
+      $description: >-
+        Start the command elevated, after a UAC prompt. Ctrl+Shift+click does
+        the same for any item. Not used by internal commands.
+    - windowStyle: normal
+      $name: Window style
+      $description: >-
+        How the started program's window is shown. Hidden is meant for console
+        commands and scripts; some programs ignore it.
+      $options:
+      - normal: Normal
+      - minimized: Minimized
+      - maximized: Maximized
+      - hidden: Hidden
     - matchExtensions: ""
       $name: "File extension filter"
       $description: >-
@@ -445,6 +521,17 @@ File Explorer report the island's XAML root to a hooked handler.
           $description: >-
             Runs the menu item when the keys are pressed in a File Explorer
             window, e.g. Ctrl+Shift+T. Not used for submenus.
+        - runAsAdmin: false
+          $name: Run as administrator
+          $description: >-
+            Start the command elevated, after a UAC prompt.
+        - windowStyle: normal
+          $name: Window style
+          $options:
+          - normal: Normal
+          - minimized: Minimized
+          - maximized: Maximized
+          - hidden: Hidden
         - iconGlyph: ""
           $name: Icon glyph or icon path
           $description: >-
@@ -476,6 +563,17 @@ File Explorer report the island's XAML root to a hooked handler.
               $description: >-
                 Runs the menu item when the keys are pressed in a File
                 Explorer window, e.g. Ctrl+Shift+T.
+            - runAsAdmin: false
+              $name: Run as administrator
+              $description: >-
+                Start the command elevated, after a UAC prompt.
+            - windowStyle: normal
+              $name: Window style
+              $options:
+              - normal: Normal
+              - minimized: Minimized
+              - maximized: Maximized
+              - hidden: Hidden
             - iconGlyph: ""
               $name: Icon glyph or icon path
               $description: >-
@@ -670,6 +768,14 @@ File Explorer report the island's XAML root to a hooked handler.
     separator of the contextual commands (Set as background, Rotate left,
     Rotate right, Extract all) is hidden along with them, once none of them is
     left to show.
+- defaultButtonOrder: ""
+  $name: Built-in button order
+  $description: >-
+    The order of the built-in buttons, separated by commas, with | for a
+    separator, e.g. "sort, view | new | cut, copy, paste, rename, share,
+    delete". The names are new, cut, copy, paste, rename, share, delete, sort
+    and view. Buttons which aren't listed come last. Leave empty for File
+    Explorer's own order.
 - newPlus:
   - enabled: false
     $name: Replace New with New+
@@ -839,6 +945,9 @@ struct ActionItem {
     bool showLabel = false;
     bool isMenu = false;
     bool separatorAfter = false;
+    bool runAsAdmin = false;
+    // One of kWindowStyles, e.g. L"normal".
+    std::wstring windowStyle;
     std::vector<ActionItem> subItems;
 
     // Helper: Returns labelText if specified, otherwise falls back to name
@@ -852,6 +961,29 @@ struct KeyboardShortcut {
     UINT modifiers = 0;
     UINT vk = 0;
 };
+
+struct WindowStyleDef {
+    PCWSTR settingValue;
+    PCWSTR title;
+    int showCommand;
+};
+
+constexpr WindowStyleDef kWindowStyles[] = {
+    {L"normal", L"Normal", SW_SHOWNORMAL},
+    {L"minimized", L"Minimized", SW_SHOWMINNOACTIVE},
+    {L"maximized", L"Maximized", SW_SHOWMAXIMIZED},
+    {L"hidden", L"Hidden", SW_HIDE},
+};
+
+int WindowStyleIndex(std::wstring_view value) {
+    for (int i = 0; i < (int)ARRAYSIZE(kWindowStyles); i++) {
+        if (value.size() == wcslen(kWindowStyles[i].settingValue) &&
+            _wcsnicmp(value.data(), kWindowStyles[i].settingValue,
+                      value.size()) == 0)
+            return i;
+    }
+    return 0;
+}
 
 struct ShortcutBinding {
     KeyboardShortcut shortcut;
@@ -889,6 +1021,91 @@ constexpr int kViewButtonIndex = 8;
 constexpr int kLabeledDefaultButtons[] = {kNewButtonIndex, kSortButtonIndex,
                                           kViewButtonIndex};
 
+// The built-in buttons which can be reordered: New to View, the ones which
+// are always in the command bar. The contextual commands come and go with
+// the selection, so they stay where File Explorer puts them.
+constexpr int kReorderableButtonCount = kViewButtonIndex + 1;
+
+// A token of the built-in button order: a button index, or a separator.
+constexpr int kOrderSeparator = -1;
+
+// File Explorer's own order: New | Cut ... Delete | Sort View.
+std::vector<int> DefaultButtonOrderTokens() {
+    return {kNewButtonIndex, kOrderSeparator, 1, 2, 3, 4, 5,
+            kDeleteButtonIndex, kOrderSeparator, kSortButtonIndex,
+            kViewButtonIndex};
+}
+
+// Parses e.g. "sort, view | new | cut, copy, paste, rename, share, delete".
+// Buttons can be separated by commas or spaces, and | places a separator.
+// Unknown names and repeated buttons are ignored, and buttons which aren't
+// listed are put at the end in their usual order. Returns an empty list,
+// meaning File Explorer's own order, if no button is listed.
+std::vector<int> ParseDefaultButtonOrder(std::wstring_view text) {
+    std::vector<int> tokens;
+    bool listed[kReorderableButtonCount] = {};
+    bool anyListed = false;
+    std::wstring word;
+    auto flushWord = [&]() {
+        if (word.empty())
+            return;
+        for (int i = 0; i < kReorderableButtonCount; i++) {
+            if (_wcsicmp(word.c_str(), kDefaultButtons[i].settingKey) == 0) {
+                if (!listed[i]) {
+                    listed[i] = true;
+                    anyListed = true;
+                    tokens.push_back(i);
+                }
+                break;
+            }
+        }
+        word.clear();
+    };
+
+    for (WCHAR c : text) {
+        if (iswalnum(c)) {
+            word += c;
+            continue;
+        }
+        flushWord();
+        if (c == L'|')
+            tokens.push_back(kOrderSeparator);
+    }
+    flushWord();
+
+    if (!anyListed)
+        return {};
+    for (int i = 0; i < kReorderableButtonCount; i++) {
+        if (!listed[i])
+            tokens.push_back(i);
+    }
+    return tokens;
+}
+
+// The reverse of ParseDefaultButtonOrder, e.g. "new | cut, copy | sort".
+// Returns an empty string for File Explorer's own order.
+std::wstring FormatDefaultButtonOrder(std::vector<int> const& tokens) {
+    if (tokens.empty() || tokens == DefaultButtonOrderTokens())
+        return std::wstring();
+
+    std::wstring text;
+    bool afterButton = false;
+    for (int token : tokens) {
+        if (token == kOrderSeparator) {
+            text += text.empty() ? L"|" : L" |";
+            afterButton = false;
+            continue;
+        }
+        if (token < 0 || token >= kReorderableButtonCount)
+            continue;
+        if (!text.empty())
+            text += afterButton ? L", " : L" ";
+        text += kDefaultButtons[token].settingKey;
+        afterButton = true;
+    }
+    return text;
+}
+
 struct NewPlusSettings {
     bool enabled = false;
     bool showLabel = true;
@@ -921,6 +1138,9 @@ struct {
     bool hideMoreButton = false;
     bool hideDetailsButton = false;
     bool hideDetailsButtonLabel = false;
+    std::wstring defaultButtonOrderText;
+    // Parsed defaultButtonOrderText, empty for File Explorer's own order.
+    std::vector<int> defaultButtonOrder;
     int itemSpacing = -1;
     bool showSettingsItem = true;
     int settingsItemOrder = -1;
@@ -1077,6 +1297,11 @@ struct ManagedElement {
         muxc::CommandBarOverflowButtonVisibility::Auto;
     bool watched = false;
     int64_t visibilityToken = 0;
+    // For a command bar whose built-in buttons were reordered: their
+    // original order, with the separators between them.
+    std::vector<winrt::weak_ref<mux::UIElement>> originalButtonOrder;
+    // A built-in separator left over by the custom button order, hidden.
+    bool unusedSeparator = false;
 };
 
 thread_local std::vector<ManagedElement> g_managedElements;
@@ -2164,28 +2389,48 @@ std::wstring BuildParameters(std::wstring parameters,
     return parameters;
 }
 
+struct LaunchOptions {
+    bool runAsAdmin = false;
+    int showCommand = SW_SHOWNORMAL;
+    // The owner of the UAC prompt, so that it comes up in the foreground.
+    HWND hOwnerWnd = nullptr;
+};
+
 void ExecuteProcess(std::wstring const& command,
                     std::wstring const& parameters,
-                    std::wstring const& workingDir) {
+                    std::wstring const& workingDir,
+                    LaunchOptions const& options) {
     bool isPath = command.find(L'\\') != std::wstring::npos;
     SHELLEXECUTEINFOW execInfo{};
     execInfo.cbSize = sizeof(execInfo);
     execInfo.fMask = SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC;
+    execInfo.hwnd = options.runAsAdmin ? options.hOwnerWnd : nullptr;
+    execInfo.lpVerb = options.runAsAdmin ? L"runas" : nullptr;
     execInfo.lpFile = command.c_str();
     execInfo.lpParameters = parameters.empty() ? nullptr : parameters.c_str();
     execInfo.lpDirectory =
         (isPath && !workingDir.empty()) ? workingDir.c_str() : nullptr;
-    execInfo.nShow = SW_SHOWNORMAL;
+    execInfo.nShow = options.showCommand;
 
     if (!ShellExecuteExW(&execInfo)) {
+        // ERROR_CANCELLED (1223) means that the UAC prompt was declined.
         Wh_Log(L"ShellExecuteExW failed for %s: %u", command.c_str(),
                GetLastError());
     }
 }
 
 // Runs on a worker thread, so that a slow or unresponsive shell can't block
-// the window.
-void LaunchItemForWindow(HWND hExplorerWnd, ActionItem const& item) {
+// the window. With forceRunAsAdmin, the command runs elevated even if the
+// item isn't set to (Ctrl+Shift+click).
+void LaunchItemForWindow(HWND hExplorerWnd,
+                         ActionItem const& item,
+                         bool forceRunAsAdmin) {
+    LaunchOptions options;
+    options.runAsAdmin = item.runAsAdmin || forceRunAsAdmin;
+    options.showCommand =
+        kWindowStyles[WindowStyleIndex(item.windowStyle)].showCommand;
+    options.hOwnerWnd = hExplorerWnd;
+
     bool allSelected =
         item.parameters.find(L"%sel%") != std::wstring::npos ||
         item.parameters.find(L"%sel_each") != std::wstring::npos ||
@@ -2214,7 +2459,7 @@ void LaunchItemForWindow(HWND hExplorerWnd, ActionItem const& item) {
         if (capturedContext.allSelectedPaths.empty()) {
             std::wstring param = item.parameters;
             param = BuildParameters(param, capturedContext);
-            ExecuteProcess(command, param, workingDir);
+            ExecuteProcess(command, param, workingDir, options);
             return;
         }
 
@@ -2243,13 +2488,13 @@ void LaunchItemForWindow(HWND hExplorerWnd, ActionItem const& item) {
             singleCtx.allSelectedPaths = {path};
             param = BuildParameters(param, singleCtx);
 
-            ExecuteProcess(command, param, workingDir);
+            ExecuteProcess(command, param, workingDir, options);
         }
         return;
     }
 
     std::wstring parameters = BuildParameters(item.parameters, capturedContext);
-    ExecuteProcess(command, parameters, workingDir);
+    ExecuteProcess(command, parameters, workingDir, options);
 }
 
 std::mutex g_launchThreadsMutex;
@@ -2375,13 +2620,124 @@ void SendKeyCombo(std::initializer_list<WORD> keys) {
     SendInput((UINT)inputs.size(), inputs.data(), sizeof(INPUT));
 }
 
+bool SetClipboardText(std::wstring const& text) {
+    // Another program may have the clipboard open for a moment.
+    bool opened = false;
+    for (int attempt = 0; attempt < 10 && !opened; attempt++) {
+        if (attempt > 0)
+            Sleep(20);
+        opened = OpenClipboard(nullptr);
+    }
+    if (!opened) {
+        Wh_Log(L"OpenClipboard failed: %u", GetLastError());
+        return false;
+    }
+
+    bool succeeded = false;
+    size_t size = (text.size() + 1) * sizeof(WCHAR);
+    if (HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, size)) {
+        if (void* data = GlobalLock(hMem)) {
+            memcpy(data, text.c_str(), size);
+            GlobalUnlock(hMem);
+            if (EmptyClipboard() && SetClipboardData(CF_UNICODETEXT, hMem))
+                succeeded = true;
+        }
+        if (!succeeded)
+            GlobalFree(hMem);
+    }
+    CloseClipboard();
+    return succeeded;
+}
+
+enum class CopyKind {
+    Path,
+    Name,
+    Dir,
+};
+
+// Copies the selected items' paths or names, one per line, or the current
+// folder's if nothing is selected.
+void CopyToClipboardForWindow(HWND hExplorerWnd, CopyKind kind) {
+    ExplorerContext context = GetExplorerContext(hExplorerWnd, true);
+
+    auto folderName = [&context]() {
+        std::wstring dir = context.folderPath;
+        while (dir.size() > 3 && (dir.back() == L'\\' || dir.back() == L'/'))
+            dir.pop_back();
+        PCWSTR name = dir.empty() ? nullptr : PathFindFileNameW(dir.c_str());
+        return name && *name ? std::wstring(name) : context.folderDisplayName;
+    };
+
+    std::wstring text;
+    if (kind == CopyKind::Dir || context.allSelectedPaths.empty()) {
+        text = kind == CopyKind::Name ? folderName() : context.folderPath;
+    } else {
+        for (auto const& path : context.allSelectedPaths) {
+            if (!text.empty())
+                text += L"\r\n";
+            if (kind == CopyKind::Name) {
+                PCWSTR name = PathFindFileNameW(path.c_str());
+                text += name && *name ? name : path.c_str();
+            } else {
+                text += path;
+            }
+        }
+    }
+
+    if (text.empty()) {
+        Wh_Log(L"Nothing to copy for window %08X",
+               (DWORD)(ULONG_PTR)hExplorerWnd);
+        return;
+    }
+    SetClipboardText(text);
+}
+
+void RefreshViewForWindow(HWND hExplorerWnd) {
+    if (auto shellView = GetActiveShellView(hExplorerWnd)) {
+        HRESULT hr = shellView->Refresh();
+        if (FAILED(hr))
+            Wh_Log(L"IShellView::Refresh failed: %08X", hr);
+    }
+}
+
+void CreateNewItemForWindow(HWND hExplorerWnd,
+                            bool isDirectory,
+                            std::wstring name);
+
 // Runs an item for the given File Explorer window. Called from the thread of
-// the window, on a click or a keyboard shortcut.
-void InvokeActionItem(HWND hWnd, ActionItem const& item) {
+// the window, on a click or a keyboard shortcut. With forceRunAsAdmin, a
+// command runs elevated even if the item isn't set to.
+void InvokeActionItem(HWND hWnd,
+                      ActionItem const& item,
+                      bool forceRunAsAdmin = false) {
     if (item.command.empty() || g_unloading)
         return;
 
     std::wstring_view cmd = item.command;
+
+    if (IsCommandMatch(cmd, L"CopyPath") || IsCommandMatch(cmd, L"CopyName") ||
+        IsCommandMatch(cmd, L"CopyDir")) {
+        CopyKind kind = IsCommandMatch(cmd, L"CopyPath")   ? CopyKind::Path
+                        : IsCommandMatch(cmd, L"CopyName") ? CopyKind::Name
+                                                           : CopyKind::Dir;
+        RunShellWorkOnWorkerThread(
+            [hWnd, kind]() { CopyToClipboardForWindow(hWnd, kind); });
+        return;
+    }
+
+    if (IsCommandMatch(cmd, L"NewFolder") || IsCommandMatch(cmd, L"NewFile")) {
+        bool isDirectory = IsCommandMatch(cmd, L"NewFolder");
+        RunShellWorkOnWorkerThread(
+            [hWnd, isDirectory, name = TrimQuotesAndSpaces(item.parameters)]() {
+                CreateNewItemForWindow(hWnd, isDirectory, name);
+            });
+        return;
+    }
+
+    if (IsCommandMatch(cmd, L"Refresh")) {
+        RunShellWorkOnWorkerThread([hWnd]() { RefreshViewForWindow(hWnd); });
+        return;
+    }
 
     if (IsCommandMatch(cmd, L"TogglePreview")) {
         SendKeyCombo({VK_MENU, 'P'});
@@ -2415,8 +2771,9 @@ void InvokeActionItem(HWND hWnd, ActionItem const& item) {
         return;
     }
 
-    RunShellWorkOnWorkerThread(
-        [hWnd, item]() { LaunchItemForWindow(hWnd, item); });
+    RunShellWorkOnWorkerThread([hWnd, item, forceRunAsAdmin]() {
+        LaunchItemForWindow(hWnd, item, forceRunAsAdmin);
+    });
 }
 
 void OnActionInvoked(mux::FrameworkElement const& elementForWindow,
@@ -2424,7 +2781,12 @@ void OnActionInvoked(mux::FrameworkElement const& elementForWindow,
     if (item.command.empty() || g_unloading)
         return;
 
-    InvokeActionItem(GetExplorerWindowForElement(elementForWindow), item);
+    // Ctrl+Shift+click runs the command as administrator, like in the Start
+    // menu and the taskbar.
+    bool forceRunAsAdmin =
+        GetKeyState(VK_CONTROL) < 0 && GetKeyState(VK_SHIFT) < 0;
+    InvokeActionItem(GetExplorerWindowForElement(elementForWindow), item,
+                     forceRunAsAdmin);
 }
 
 std::wstring GetPowerToysNewPlusFolder() {
@@ -2828,6 +3190,68 @@ void CreateFromTemplateForWindow(HWND hExplorerWnd,
     if (!succeeded &&
         GetFileAttributesW(targetPath.c_str()) == INVALID_FILE_ATTRIBUTES)
         return;
+    SelectAndRename(context.shellView, targetPath);
+}
+
+// internal:NewFolder and internal:NewFile. The name comes from the item's
+// parameters, with the New+ filename variables ($YYYY, $MM, ...) replaced.
+// Created through IFileOperation, so that Ctrl+Z undoes it.
+void CreateNewItemForWindow(HWND hExplorerWnd,
+                            bool isDirectory,
+                            std::wstring name) {
+    ExplorerContext context = GetExplorerContext(hExplorerWnd);
+    if (context.folderPath.empty()) {
+        Wh_Log(L"No filesystem folder for window %08X",
+               (DWORD)(ULONG_PTR)hExplorerWnd);
+        return;
+    }
+
+    if (name.empty())
+        name = isDirectory ? L"New folder" : L"file";
+    name = ReplaceNameVariables(name, context.folderPath);
+    if (name.find_first_of(L"\\/:*?\"<>|") != std::wstring::npos) {
+        Wh_Log(L"Invalid name: %s", name.c_str());
+        return;
+    }
+
+    std::wstring targetPath =
+        MakeUniquePath(context.folderPath, name, isDirectory);
+    if (targetPath.empty()) {
+        Wh_Log(L"Couldn't find a free name for %s", name.c_str());
+        return;
+    }
+
+    winrt::com_ptr<IFileOperation> operation;
+    HRESULT hr = CoCreateInstance(CLSID_FileOperation, nullptr, CLSCTX_ALL,
+                                  IID_PPV_ARGS(operation.put()));
+    if (FAILED(hr)) {
+        Wh_Log(L"CoCreateInstance(FileOperation) failed: %08X", hr);
+        return;
+    }
+
+    if (FAILED(operation->SetOperationFlags(FOF_NO_UI | FOF_ALLOWUNDO |
+                                            FOFX_ADDUNDORECORD))) {
+        operation->SetOperationFlags(FOF_NO_UI);
+    }
+
+    winrt::com_ptr<IShellItem> folderItem;
+    hr = SHCreateItemFromParsingName(context.folderPath.c_str(), nullptr,
+                                     IID_PPV_ARGS(folderItem.put()));
+    if (SUCCEEDED(hr)) {
+        hr = operation->NewItem(
+            folderItem.get(),
+            isDirectory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL,
+            PathFindFileNameW(targetPath.c_str()), nullptr, nullptr);
+    }
+    if (SUCCEEDED(hr))
+        hr = operation->PerformOperations();
+    if (FAILED(hr) ||
+        GetFileAttributesW(targetPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        Wh_Log(L"Creating %s failed: %08X", targetPath.c_str(), hr);
+        return;
+    }
+
+    Wh_Log(L"Created %s", targetPath.c_str());
     SelectAndRename(context.shellView, targetPath);
 }
 
@@ -3261,23 +3685,37 @@ muxc::IconElement CreateIconElement(std::wstring const& iconSetting,
     return CreateGlyphIcon(defaultGlyph);
 }
 
+PCWSTR InternalCommandGlyph(std::wstring_view cmd) {
+    if (IsCommandMatch(cmd, L"OpenWith"))
+        return L"\uE7AC";
+    if (IsCommandMatch(cmd, L"TogglePreview"))
+        return L"\uE8A1";
+    if (IsCommandMatch(cmd, L"ToggleDetails"))
+        return L"\uE9F9";
+    if (IsCommandMatch(cmd, L"FolderOptions"))
+        return L"\uE713";
+    if (IsCommandMatch(cmd, L"CopyPath"))
+        return L"\uE8C8";
+    if (IsCommandMatch(cmd, L"CopyName"))
+        return L"\uE8AC";
+    if (IsCommandMatch(cmd, L"CopyDir"))
+        return L"\uE8B7";
+    if (IsCommandMatch(cmd, L"NewFolder"))
+        return L"\uE8F4";
+    if (IsCommandMatch(cmd, L"NewFile"))
+        return L"\uE8A5";
+    if (IsCommandMatch(cmd, L"Refresh"))
+        return L"\uE72C";
+    return nullptr;
+}
+
 muxc::IconElement MakeCommandButtonIcon(ActionItem const& item) {
     if (item.hideIcon)
         return nullptr;
 
-    PCWSTR defaultGlyph = L"";
-    std::wstring_view cmd = item.command;
-
-    if (IsCommandMatch(cmd, L"OpenWith"))
-        defaultGlyph = L"\uE7AC";
-    else if (IsCommandMatch(cmd, L"TogglePreview"))
-        defaultGlyph = L"\uE8A1";
-    else if (IsCommandMatch(cmd, L"ToggleDetails"))
-        defaultGlyph = L"\uE9F9";
-    else if (IsCommandMatch(cmd, L"FolderOptions"))
-        defaultGlyph = L"\uE713";
-
-    return CreateIconElement(item.icon, item.command, defaultGlyph);
+    PCWSTR defaultGlyph = InternalCommandGlyph(item.command);
+    return CreateIconElement(item.icon, item.command,
+                             defaultGlyph ? defaultGlyph : L"\uE783");
 }
 
 muxc::IconElement MakeNewPlusButtonIcon(std::wstring const& iconSetting,
@@ -3428,6 +3866,7 @@ enum class ManagedKind {
     GroupSeparator,
     DetailsToggle,
     OverflowElement,
+    UnusedSeparator,
 };
 
 struct GroupMember {
@@ -3487,6 +3926,8 @@ bool ShouldHide(ManagedTarget const& target) {
             return g_settings.hideDetailsButton;
         case ManagedKind::OverflowElement:
             return g_settings.hideMoreButton;
+        case ManagedKind::UnusedSeparator:
+            return true;
         case ManagedKind::GroupSeparator:
             break;
     }
@@ -3583,15 +4024,20 @@ void WatchVisibility(mux::UIElement const& element,
                 return;
 
             mux::Visibility visibility = element.Visibility();
+            bool unusedSeparator;
             {
                 auto& entry = GetManagedElement(element);
                 entry.originalVisibility = visibility;
                 entry.hasOriginalVisibility = true;
+                unusedSeparator = entry.unusedSeparator;
             }
 
+            // The role of a separator changes with the button order, so the
+            // recompute below decides for those.
             if (target.kind != ManagedKind::GroupSeparator &&
+                target.kind != ManagedKind::UnusedSeparator &&
                 visibility != mux::Visibility::Collapsed &&
-                ShouldHide(target)) {
+                (unusedSeparator || ShouldHide(target))) {
                 SetVisibilityInternal(element, mux::Visibility::Collapsed);
             }
             QueueVisibilityRecompute(owner);
@@ -3976,6 +4422,13 @@ void ApplyDefaultButtonVisibility(muxc::CommandBar const& commandBar,
 
         if (entry.isSeparator) {
             auto separator = entry.command.as<muxc::AppBarSeparator>();
+            if (auto* managed = FindManagedElement(separator);
+                managed && managed->unusedSeparator) {
+                setVisibility(separator, {ManagedKind::UnusedSeparator});
+                prevIndex = -1;
+                continue;
+            }
+
             int target = -1;
             if (prevIndex == kNewButtonIndex)
                 target = kNewButtonIndex;
@@ -5288,6 +5741,219 @@ void EnsureNewPlusButton(muxc::CommandBar const& commandBar) {
         CreateNewPlusButton(originalIconUri, openMenuOnHover, menuHoverDelay));
 }
 
+bool IsSameObject(wf::IInspectable const& a, wf::IInspectable const& b) {
+    if (!a || !b)
+        return !a && !b;
+    return winrt::get_abi(a.as<wf::IUnknown>()) ==
+           winrt::get_abi(b.as<wf::IUnknown>());
+}
+
+// Puts the built-in buttons New to View in the order of the
+// defaultButtonOrder setting, or back in their original order if restore is
+// set or the setting is empty. Only the elements from the first to the last
+// of these buttons are moved: the buttons, File Explorer's separators between
+// them, and the New+ button, which stays in front of New. The order is
+// applied by moving the existing elements, which keep working as before.
+void ApplyDefaultButtonOrder(muxc::CommandBar const& commandBar, bool restore) {
+    if (commandBar.Name() != L"FileExplorerCommandBar")
+        return;
+
+    std::vector<int> order;
+    if (!restore) {
+        std::lock_guard<std::mutex> lock(g_settings.mutex);
+        order = g_settings.defaultButtonOrder;
+    }
+
+    std::vector<winrt::weak_ref<mux::UIElement>> originalOrder;
+    if (auto* barEntry = FindManagedElement(commandBar))
+        originalOrder = barEntry->originalButtonOrder;
+    if (order.empty() && originalOrder.empty())
+        return;
+
+    auto commands = commandBar.PrimaryCommands();
+    uint32_t count = commands.Size();
+
+    std::vector<muxc::ICommandBarElement> buttons(kReorderableButtonCount,
+                                                  nullptr);
+    muxc::ICommandBarElement newPlus{nullptr};
+    uint32_t first = count;
+    uint32_t last = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        auto command = commands.GetAt(i);
+        if (IsOurElement(command)) {
+            if (!IsOurNewPlusButton(command))
+                continue;
+            newPlus = command;
+        } else if (auto button = command.try_as<muxc::AppBarButton>()) {
+            if (GetAutomationId(button) == L"DetailsPaneToggleButton")
+                continue;
+            int index = IdentifyDefaultButton(button);
+            if (index < 0 || index >= kReorderableButtonCount ||
+                buttons[index])
+                continue;
+            buttons[index] = command;
+        } else {
+            continue;
+        }
+        first = std::min(first, i);
+        last = std::max(last, i);
+    }
+    if (first >= count)
+        return;
+
+    auto isButton = [&buttons](muxc::ICommandBarElement const& command) {
+        return std::any_of(buttons.begin(), buttons.end(),
+                           [&command](muxc::ICommandBarElement const& button) {
+                               return button && IsSameObject(button, command);
+                           });
+    };
+    auto contains = [](std::vector<muxc::ICommandBarElement> const& list,
+                       muxc::ICommandBarElement const& command) {
+        return std::any_of(list.begin(), list.end(),
+                           [&command](muxc::ICommandBarElement const& entry) {
+                               return IsSameObject(entry, command);
+                           });
+    };
+
+    // Anything else between the buttons means an unknown layout, which is
+    // left alone.
+    std::vector<muxc::ICommandBarElement> region;
+    for (uint32_t i = first; i <= last; i++) {
+        auto command = commands.GetAt(i);
+        if (!IsSameObject(command, newPlus) && !isButton(command) &&
+            (IsOurElement(command) ||
+             !command.try_as<muxc::AppBarSeparator>())) {
+            Wh_Log(L"Unexpected command %u among the built-in buttons, not "
+                   L"reordering them",
+                   i);
+            return;
+        }
+        region.push_back(command);
+    }
+
+    // The original order, without the New+ button. Recorded on the first
+    // reorder, and again if File Explorer recreated the buttons since.
+    std::vector<muxc::ICommandBarElement> original;
+    for (auto const& weakElement : originalOrder) {
+        auto element = weakElement.get();
+        if (!element)
+            continue;
+        for (auto const& command : region) {
+            if (IsSameObject(command, element)) {
+                original.push_back(command);
+                break;
+            }
+        }
+    }
+    bool recordOriginal = original.empty();
+    if (recordOriginal) {
+        for (auto const& command : region) {
+            if (!IsSameObject(command, newPlus))
+                original.push_back(command);
+        }
+    }
+
+    // The separators, in their original order.
+    std::vector<muxc::ICommandBarElement> separators;
+    for (auto const& command : original) {
+        if (!isButton(command))
+            separators.push_back(command);
+    }
+    for (auto const& command : region) {
+        if (!IsSameObject(command, newPlus) && !isButton(command) &&
+            !contains(separators, command))
+            separators.push_back(command);
+    }
+
+    bool restoring = order.empty();
+    std::vector<muxc::ICommandBarElement> desired;
+    auto append = [&](muxc::ICommandBarElement const& command) {
+        if (newPlus && buttons[kNewButtonIndex] &&
+            IsSameObject(command, buttons[kNewButtonIndex]))
+            desired.push_back(newPlus);
+        desired.push_back(command);
+    };
+
+    size_t usedSeparators = 0;
+    if (restoring) {
+        for (auto const& command : original)
+            append(command);
+        usedSeparators = separators.size();
+    } else {
+        for (int token : order) {
+            if (token == kOrderSeparator) {
+                if (usedSeparators < separators.size())
+                    append(separators[usedSeparators++]);
+            } else if (buttons[token]) {
+                append(buttons[token]);
+            }
+        }
+    }
+
+    // Whatever wasn't placed, e.g. separators left over by an order with
+    // fewer separators, goes at the end.
+    for (auto const& command : region) {
+        if (!contains(desired, command))
+            desired.push_back(command);
+    }
+
+    if (recordOriginal && !restoring) {
+        auto& barEntry = GetManagedElement(commandBar);
+        barEntry.originalButtonOrder.clear();
+        for (auto const& command : original) {
+            barEntry.originalButtonOrder.push_back(
+                winrt::make_weak(command.as<mux::UIElement>()));
+        }
+    }
+
+    for (size_t i = 0; i < separators.size(); i++) {
+        auto element = separators[i].as<mux::UIElement>();
+        if (i >= usedSeparators)
+            GetManagedElement(element).unusedSeparator = true;
+        else if (auto* managed = FindManagedElement(element))
+            managed->unusedSeparator = false;
+    }
+
+    // Move the elements into place, one at a time. Each element keeps its
+    // identity, so File Explorer's handlers and bindings stay intact.
+    int moves = 0;
+    try {
+        for (uint32_t i = 0; i < desired.size(); i++) {
+            uint32_t position = first + i;
+            if (IsSameObject(commands.GetAt(position), desired[i]))
+                continue;
+
+            uint32_t from = 0;
+            for (uint32_t j = position + 1; j <= last; j++) {
+                if (IsSameObject(commands.GetAt(j), desired[i])) {
+                    from = j;
+                    break;
+                }
+            }
+            if (!from) {
+                Wh_Log(L"Couldn't find command %u to reorder", i);
+                break;
+            }
+
+            commands.RemoveAt(from);
+            commands.InsertAt(position, desired[i]);
+            moves++;
+        }
+    } catch (...) {
+        Wh_Log(L"Reordering failed: %08X", winrt::to_hresult().value);
+    }
+
+    if (moves > 0) {
+        Wh_Log(L"%s the built-in buttons (%d moves)",
+               restoring ? L"Restored the order of" : L"Reordered", moves);
+    }
+
+    if (restoring) {
+        if (auto* barEntry = FindManagedElement(commandBar))
+            barEntry->originalButtonOrder.clear();
+    }
+}
+
 void UpdateCommandBar(muxc::CommandBar const& commandBar) {
     if (g_unloading)
         return;
@@ -5300,6 +5966,7 @@ void UpdateCommandBar(muxc::CommandBar const& commandBar) {
 
     if (commandBar.Name() == L"FileExplorerCommandBar") {
         EnsureNewPlusButton(commandBar);
+        ApplyDefaultButtonOrder(commandBar, false);
         if (!placeOnSecondary) {
             EnsureActionButtons(commandBar);
             EnsureSettingsButton(commandBar);
@@ -5436,6 +6103,7 @@ void RemoveButtonsForCurrentThread() {
                 entry.vectorChangedToken);
             commandBar.ActualThemeChanged(entry.themeChangedToken);
             RemoveOurButtons(commandBar);
+            ApplyDefaultButtonOrder(commandBar, true);
             ApplyDefaultButtonVisibility(commandBar, true);
         } catch (...) {
             Wh_Log(L"Error %08X", winrt::to_hresult().value);
@@ -6364,6 +7032,9 @@ ActionItem LoadActionItem(PCWSTR prefix, int depth, bool* isEmpty) {
     item.showLabel = Wh_GetIntSetting(L"%s.showLabel", prefix) != 0;
     item.labelText = Wh_GetStringSetting(L"%s.labelText", prefix);
     item.separatorAfter = Wh_GetIntSetting(L"%s.separatorAfter", prefix) != 0;
+    item.runAsAdmin = Wh_GetIntSetting(L"%s.runAsAdmin", prefix) != 0;
+    item.windowStyle =
+        WindhawkUtils::StringSetting::make(L"%s.windowStyle", prefix).get();
 
     if (depth < kMaxMenuDepth) {
         auto type = WindhawkUtils::StringSetting::make(L"%s.type", prefix);
@@ -6423,6 +7094,11 @@ void LoadSettings() {
     }
     g_settings.hideDetailsButtonLabel =
         Wh_GetIntSetting(L"hideDefaultButtonLabels.details") != 0;
+
+    g_settings.defaultButtonOrderText =
+        WindhawkUtils::StringSetting::make(L"defaultButtonOrder").get();
+    g_settings.defaultButtonOrder =
+        ParseDefaultButtonOrder(g_settings.defaultButtonOrderText);
 
     memset(g_settings.hideSeparatorAfterButton, 0,
            sizeof(g_settings.hideSeparatorAfterButton));
@@ -6503,6 +7179,7 @@ struct EditableSettings {
     bool showMenuChevrons = false;
     bool hideDefaultButtonLabels[kDefaultButtonCount] = {};
     bool hideDetailsButtonLabel = false;
+    std::wstring defaultButtonOrder;
     NewPlusSettings newPlus;
     ContextMenuItemSettings contextMenuItem;
 };
@@ -6534,6 +7211,7 @@ EditableSettings SnapshotSettings() {
             g_settings.hideDefaultButtonLabels[i];
     }
     settings.hideDetailsButtonLabel = g_settings.hideDetailsButtonLabel;
+    settings.defaultButtonOrder = g_settings.defaultButtonOrderText;
     settings.newPlus = g_settings.newPlus;
     settings.contextMenuItem = g_settings.contextMenuItem;
     return settings;
@@ -6683,6 +7361,15 @@ std::vector<SettingsPageDef> DescribeSettingsPages(EditableSettings& s) {
                   L"\uE712", true),
         BoolField(L"hideDefaultButtons.details", L"Details pane toggle", L"",
                   &s.hideDetailsButton, L"\uE946", true),
+        HeaderField(L"Order"),
+        StringField(L"defaultButtonOrder", L"Built-in button order",
+                    L"The buttons separated by commas, with | for a "
+                    L"separator, e.g. sort, view | new | cut, copy, paste, "
+                    L"rename, share, delete. Names: new, cut, copy, paste, "
+                    L"rename, share, delete, sort, view. Buttons which aren't "
+                    L"listed come last. Leave empty for File Explorer's own "
+                    L"order.",
+                    &s.defaultButtonOrder, true, L"\uE8CB"),
         HeaderField(L"Labels"),
         labelField(kNewButtonIndex),
         labelField(kSortButtonIndex),
@@ -6906,6 +7593,10 @@ void AppendItemEntries(std::vector<RegEntry>& entries,
     }
     entries.push_back(
         BoolEntry(prefix + L".separatorAfter", item.separatorAfter));
+    entries.push_back(BoolEntry(prefix + L".runAsAdmin", item.runAsAdmin));
+    entries.push_back(StringEntry(
+        prefix + L".windowStyle",
+        kWindowStyles[WindowStyleIndex(item.windowStyle)].settingValue));
 
     if (depth < kMaxMenuDepth) {
         int index = 0;
@@ -7193,18 +7884,6 @@ struct SaveJob {
     EditableSettings settings;
     SaveResult result;
 };
-
-PCWSTR InternalCommandGlyph(std::wstring_view cmd) {
-    if (IsCommandMatch(cmd, L"OpenWith"))
-        return L"\uE7AC";
-    if (IsCommandMatch(cmd, L"TogglePreview"))
-        return L"\uE8A1";
-    if (IsCommandMatch(cmd, L"ToggleDetails"))
-        return L"\uE9F9";
-    if (IsCommandMatch(cmd, L"FolderOptions"))
-        return L"\uE713";
-    return nullptr;
-}
 
 ActionItem MakeNewActionItem(bool isMenu, int depth) {
     ActionItem item;
@@ -7925,6 +8604,8 @@ ActionItem ImportActionItem(FlatSettings const& root,
     item.labelText = FlatSettingString(root, prefix + L".labelText");
     item.separatorAfter =
         FlatSettingInt(root, prefix + L".separatorAfter", 0) != 0;
+    item.runAsAdmin = FlatSettingInt(root, prefix + L".runAsAdmin", 0) != 0;
+    item.windowStyle = FlatSettingString(root, prefix + L".windowStyle");
 
     if (depth < kMaxMenuDepth) {
         item.isMenu = FlatSettingString(root, prefix + L".type") == L"menu";
@@ -8102,7 +8783,12 @@ class SettingsWindow {
     // Reordering by dragging, for the toolbar items of the preview and for
     // the entries of a menu. A group lists the elements which can be dragged
     // among each other, in their order.
-    enum DragGroup { kDragGroupPreview, kDragGroupEntries, kDragGroupCount };
+    enum DragGroup {
+        kDragGroupPreview,
+        kDragGroupEntries,
+        kDragGroupBuiltIns,
+        kDragGroupCount
+    };
     void SetDragGroup(int group,
                       mux::UIElement const& reference,
                       std::vector<mux::UIElement> elements,
@@ -8124,6 +8810,9 @@ class SettingsWindow {
     void ResetDragVisuals(int group);
     bool IsDragClick() const { return m_drag.active || m_suppressDragClick; }
     void ReorderToolbarItems(std::vector<int> order, int from, int to);
+    void ReorderBuiltInButtons(std::vector<size_t> const& slots,
+                               int from,
+                               int to);
     void ReorderMenuEntries(std::vector<int> const& parentPath,
                             int from,
                             int to);
@@ -9375,6 +10064,8 @@ muxc::AppBarButton SettingsWindow::MakePreviewButton(
     }
     button.Click(
         [this, pageTag](wf::IInspectable const&, mux::RoutedEventArgs const&) {
+            if (IsDragClick())
+                return;
             NavigateTo(pageTag);
         });
     return button;
@@ -9532,36 +10223,104 @@ void SettingsWindow::RebuildPreview() {
     auto primaryCommands = primary.PrimaryCommands();
     auto secondaryCommands = secondary.PrimaryCommands();
 
-    if (s.newPlus.enabled) {
+    auto appendNewPlus = [&]() -> mux::UIElement {
+        if (!s.newPlus.enabled)
+            return nullptr;
         bool showLabel = s.newPlus.showLabel && !s.newPlus.buttonLabel.empty();
         auto icon = s.newPlus.buttonIcon.empty()
                         ? builtInIcon(kNewButtonIndex)
                         : CreateIconElement(s.newPlus.buttonIcon,
                                             std::wstring(), L"");
-        primaryCommands.Append(MakePreviewButton(
+        auto button = MakePreviewButton(
             icon,
             s.newPlus.buttonLabel.empty() ? L"New+" : s.newPlus.buttonLabel,
-            showLabel, true, L"newPlus"));
-    }
+            showLabel, true, L"newPlus");
+        primaryCommands.Append(button);
+        return button;
+    };
 
     m_previewBuiltIns.clear();
-    auto appendBuiltIn = [&](int id, bool showLabel, bool chevron) {
-        if (*BuiltInHiddenField(id))
-            return;
-        showLabel = showLabel && !s.hideDefaultButtonLabels[id];
-        primaryCommands.Append(MakePreviewBuiltIn(
-            id, builtInIcon(id), builtInLabel(id), showLabel, chevron));
+    auto isBuiltInShown = [&](int id) {
+        if (id == kNewButtonIndex && s.newPlus.enabled &&
+            !s.newPlus.keepOriginalNewButton)
+            return false;
+        return !*BuiltInHiddenField(id);
     };
-    if (!s.newPlus.enabled || s.newPlus.keepOriginalNewButton)
-        appendBuiltIn(kNewButtonIndex, true, true);
-    if (!s.hideSeparatorAfterNew)
-        primaryCommands.Append(muxc::AppBarSeparator());
-    for (int i = kNewButtonIndex + 1; i <= kDeleteButtonIndex; i++)
-        appendBuiltIn(i, false, false);
-    if (!s.hideSeparatorAfterDelete)
-        primaryCommands.Append(muxc::AppBarSeparator());
-    appendBuiltIn(kSortButtonIndex, true, true);
-    appendBuiltIn(kViewButtonIndex, true, true);
+    auto appendBuiltIn = [&](int id) -> mux::UIElement {
+        if (!isBuiltInShown(id))
+            return nullptr;
+        bool labeled = id == kNewButtonIndex || id == kSortButtonIndex ||
+                       id == kViewButtonIndex;
+        bool showLabel = labeled && !s.hideDefaultButtonLabels[id];
+        auto button = MakePreviewBuiltIn(id, builtInIcon(id), builtInLabel(id),
+                                         showLabel, labeled);
+        primaryCommands.Append(button);
+        return button;
+    };
+
+    // The built-in buttons in their order, with separators placed the way
+    // ApplyDefaultButtonOrder and ApplyDefaultButtonVisibility do: File
+    // Explorer has two separators among these buttons, a separator after
+    // New or Delete follows its setting, and any other one is shown unless
+    // all buttons up to the next separator are hidden. The shown buttons
+    // and separators can be dragged to reorder them; builtInSlots holds the
+    // position in the order of each of them.
+    std::vector<int> order = ParseDefaultButtonOrder(s.defaultButtonOrder);
+    if (order.empty())
+        order = DefaultButtonOrderTokens();
+    std::vector<mux::UIElement> builtInElements;
+    std::vector<size_t> builtInSlots;
+    int separatorsLeft = 2;
+    int prevButton = -1;
+    for (size_t i = 0; i < order.size(); i++) {
+        int token = order[i];
+        if (token != kOrderSeparator) {
+            // With New+, its button stands for New when dragged.
+            mux::UIElement element{nullptr};
+            if (token == kNewButtonIndex)
+                element = appendNewPlus();
+            mux::UIElement builtIn = appendBuiltIn(token);
+            if (!element)
+                element = builtIn;
+            if (element) {
+                builtInElements.push_back(element);
+                builtInSlots.push_back(i);
+            }
+            prevButton = token;
+            continue;
+        }
+
+        if (separatorsLeft == 0)
+            continue;
+        separatorsLeft--;
+        bool show;
+        if (prevButton == kNewButtonIndex) {
+            show = !s.hideSeparatorAfterNew;
+        } else if (prevButton == kDeleteButtonIndex) {
+            show = !s.hideSeparatorAfterDelete;
+        } else {
+            show = false;
+            for (size_t j = i + 1;
+                 j < order.size() && order[j] != kOrderSeparator; j++) {
+                if (isBuiltInShown(order[j]) ||
+                    (order[j] == kNewButtonIndex && s.newPlus.enabled)) {
+                    show = true;
+                    break;
+                }
+            }
+        }
+        if (show) {
+            muxc::AppBarSeparator separator;
+            primaryCommands.Append(separator);
+            builtInElements.push_back(separator);
+            builtInSlots.push_back(i);
+        }
+        prevButton = -1;
+    }
+    SetDragGroup(kDragGroupBuiltIns, primary, std::move(builtInElements),
+                 [this, builtInSlots](int from, int to) {
+                     ReorderBuiltInButtons(builtInSlots, from, to);
+                 });
     if (!s.hideSeparatorAfterView)
         primaryCommands.Append(muxc::AppBarSeparator());
 
@@ -10149,6 +10908,12 @@ void SettingsWindow::BuildItemEditor() {
                 {L"internal:ToggleDetails", L"Toggle the Details pane"},
                 {L"internal:OpenWith", L"Open with\u2026"},
                 {L"internal:FolderOptions", L"Folder Options"},
+                {L"internal:CopyPath", L"Copy the selected paths"},
+                {L"internal:CopyName", L"Copy the selected names"},
+                {L"internal:CopyDir", L"Copy the current folder path"},
+                {L"internal:NewFolder", L"New folder"},
+                {L"internal:NewFile", L"New file"},
+                {L"internal:Refresh", L"Refresh"},
             },
             false);
 
@@ -10215,6 +10980,37 @@ void SettingsWindow::BuildItemEditor() {
             L"File Explorer window, e.g. Ctrl+Shift+T, Alt+X or F9. Needs "
             L"Ctrl, Alt or Win unless the key is F1-F24.",
             shortcutBox, true));
+
+        auto runAsAdminToggle = makeToggle(item->runAsAdmin);
+        runAsAdminToggle.Toggled(onToggle(
+            [](ActionItem& item, bool isOn) { item.runAsAdmin = isOn; }));
+        children.Append(MakeCard(
+            L"", L"Run as administrator",
+            L"Start the command elevated, after a UAC prompt. Ctrl+Shift+click "
+            L"does the same for any item. Not used by internal commands.",
+            runAsAdminToggle, false));
+
+        muxc::ComboBox windowStyleBox;
+        windowStyleBox.MinWidth(200);
+        for (auto const& style : kWindowStyles)
+            windowStyleBox.Items().Append(BoxString(style.title));
+        windowStyleBox.SelectedIndex(WindowStyleIndex(item->windowStyle));
+        windowStyleBox.SelectionChanged(
+            [this, path, generation](wf::IInspectable const& sender,
+                                     muxc::SelectionChangedEventArgs const&) {
+                ActionItem* item = EditedItem(path, generation);
+                int index = sender.as<muxc::ComboBox>().SelectedIndex();
+                if (!item || index < 0 ||
+                    index >= (int)ARRAYSIZE(kWindowStyles))
+                    return;
+                item->windowStyle = kWindowStyles[index].settingValue;
+                OnItemEdited();
+            });
+        children.Append(MakeCard(
+            L"", L"Window style",
+            L"How the started program's window is shown. Hidden is meant for "
+            L"console commands and scripts; some programs ignore it.",
+            windowStyleBox, false));
     }
 
     {
@@ -10709,6 +11505,45 @@ void SettingsWindow::ReorderToolbarItems(std::vector<int> order,
         m_selectedPath = {newIndexOf[moved]};
     } else {
         m_selectedBuiltIn = kPreviewSettingsItemId;
+        m_selectedPath.clear();
+    }
+    RefreshItemsPage();
+    OnModelChanged();
+}
+
+// The slots list the position in the built-in button order of each dragged
+// element. The buttons and separators which aren't shown, so can't be
+// dragged, keep their positions.
+void SettingsWindow::ReorderBuiltInButtons(std::vector<size_t> const& slots,
+                                           int from,
+                                           int to) {
+    int count = (int)slots.size();
+    if (from < 0 || from >= count || to < 0 || to >= count)
+        return;
+
+    std::vector<int> order = ParseDefaultButtonOrder(m_model.defaultButtonOrder);
+    if (order.empty())
+        order = DefaultButtonOrderTokens();
+
+    std::vector<int> shown;
+    for (size_t slot : slots) {
+        if (slot >= order.size())
+            return;
+        shown.push_back(order[slot]);
+    }
+    int moved = shown[from];
+    shown.erase(shown.begin() + from);
+    shown.insert(shown.begin() + to, moved);
+    for (int i = 0; i < count; i++)
+        order[slots[i]] = shown[i];
+
+    m_model.defaultButtonOrder = FormatDefaultButtonOrder(order);
+
+    bool newReplaced =
+        m_model.newPlus.enabled && !m_model.newPlus.keepOriginalNewButton;
+    if (moved != kOrderSeparator &&
+        !(moved == kNewButtonIndex && newReplaced)) {
+        m_selectedBuiltIn = moved;
         m_selectedPath.clear();
     }
     RefreshItemsPage();
