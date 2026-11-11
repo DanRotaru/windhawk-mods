@@ -21,6 +21,18 @@ Designed for 64‑bit Chrome on Windows.
   one opens a program, document, folder or URL, with optional arguments, working
   directory and environment variables such as `%USERPROFILE%`, and can run as
   administrator or in a minimized, maximized or hidden window.
+- **Context placeholders** — pass what you right‑clicked to a custom command:
+  `{url}` (link), `{page}`, `{title}`, `{selection}`, `{src}` (image, video or
+  audio) and `{frame}`. For example, `"{url}"` as the arguments of
+  `firefox.exe` opens a link in Firefox, and
+  `https://www.deepl.com/translator#auto/en/{selection}` translates the selected
+  text. Placeholders inside a URL are URL‑encoded. An entry that uses `{url}`,
+  `{selection}` or `{src}` only appears when there is something to pass.
+- **Per‑site commands** — show a custom command only on matching pages, for
+  example `github.com` or `youtube.com/watch*`.
+- **Chrome's original menu on demand** — optionally hold **Ctrl+Alt** while
+  opening the page menu to see it without the mod's hidden entries, custom
+  commands and groups (off by default).
 - **Custom items group** — optionally put your custom commands into one submenu
   with a label of your choice.
 - **Extensions submenu** — move all extension commands into a single
