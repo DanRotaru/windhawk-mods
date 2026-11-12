@@ -21,6 +21,8 @@ Designed for 64‑bit File Explorer on Windows 10 and 11.
 - **Leaves explicit folders alone** — opening Explorer for a specific folder,
   and navigating to This PC or Home yourself in an existing tab, works as
   usual.
+- **Never blocks Explorer** — the mod's background thread doesn't hold up
+  Explorer's windows, even when a folder is on a slow or offline network share.
 - **No polling, no lag** — the mod reacts to Shell window events, so it costs
   nothing while idle.
 
@@ -52,9 +54,17 @@ functions, so it doesn't need an update for each Explorer build.
    folder shown in each tab (start pages excluded). When tabs close, the one
    used most recently becomes the last closed folder and is saved with the
    mod's storage.
+5. With an empty
+   Default folder and **Reopen last closed folder** off, it doesn't subscribe
+   to anything.
 
 ### Notes
 
-The new window or tab first shows This PC or Home for a moment, then switches
-to your folder. With **Launch folder windows in a separate process** enabled,
-each Explorer process handles only its own windows.
+- The new window or tab can show This PC or Home very briefly before it
+  switches to your folder, and **Back** returns to This PC or Home.
+- The mod can't tell a default launch from one explicitly opened at This PC or
+  Home (for example the This PC desktop icon or `explorer shell:MyComputerFolder`);
+  those are redirected too.
+- With **Launch folder windows in a separate process** enabled, each Explorer
+  process handles its own windows; the last closed folder is shared between
+  them.
