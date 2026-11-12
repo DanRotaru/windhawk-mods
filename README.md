@@ -11,7 +11,8 @@ mod: a single `*.wh.cpp` source file plus its own README.
 | Mod | Description | Target |
 | --- | --- | --- |
 | [Chrome Context Menu Items](chrome-context-menu-items/) | Hides, adds, groups and reorders Google Chrome's context menu items, restyles Chrome's menus, and tweaks tabs and extension buttons. | `chrome.exe` |
-| [Explorer Command Bar](explorer-command-bar/) | Adds custom action buttons and dropdown menus to the Windows 11 File Explorer command bar, and lets you hide the built-in buttons, separators and spacing. | `explorer.exe`, Windows 11 24H2 / 25H2 |
+| [Explorer Command Bar](explorer-command-bar/) | Adds custom action buttons and dropdown menus to the Windows 11 File Explorer command bar, and lets you hide the built-in buttons, separators and spacing. | `explorer.exe`, Windows 11 24H2 / 25H2 / 26H2 |
+| [Explorer Default Folder](explorer-default-folder/) | Opens new File Explorer windows and tabs in a folder of your choice instead of This PC or Home, or reopens the last closed folder. | `explorer.exe`, Windows 10 / 11 |
 
 ## Installing a mod
 
@@ -51,9 +52,9 @@ than Windhawk is needed.
 
    ```
    build.bat                          :: pick a mod from a menu
-   build.bat start-menu-groups        :: build that mod directly
-   build.bat start-menu-groups -CompileOnly
-   build.bat start-menu-groups -Release
+   build.bat explorer-command-bar     :: build that mod directly
+   build.bat explorer-command-bar -CompileOnly
+   build.bat explorer-command-bar -Release
    ```
 
    Started without a mod name (for example by double-clicking it),

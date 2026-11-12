@@ -50,15 +50,15 @@ From the repository root:
 ```
 build.bat                                   :: pick a mod from the menu
 build.bat -CompileOnly                      :: menu; options are passed to build.ps1
-build.bat start-menu-groups                 :: build that mod directly
-build.bat start-menu-groups -Release
+build.bat explorer-command-bar              :: build that mod directly
+build.bat explorer-command-bar -Release
 ```
 
 Or call the PowerShell script directly:
 
 ```powershell
-.\build\build.ps1 start-menu-groups
-.\build\build.ps1 start-menu-groups -CompileOnly
+.\build\build.ps1 explorer-command-bar
+.\build\build.ps1 explorer-command-bar -CompileOnly
 .\build\build.ps1 -Source C:\path\to\some-mod.wh.cpp
 ```
 
@@ -85,7 +85,7 @@ double-clicked `build.bat` doesn't close before you can read the output.
 
 | Option | Description |
 | --- | --- |
-| `<mod-folder>` | Folder name in the repo root. `start-menu-groups` builds `start-menu-groups\start-menu-groups.wh.cpp` (or the folder's only `*.wh.cpp`). |
+| `<mod-folder>` | Folder name in the repo root. `explorer-command-bar` builds `explorer-command-bar\explorer-command-bar.wh.cpp` (or the folder's only `*.wh.cpp`). |
 | `-Source <file>` | Build this `.wh.cpp` file instead; overrides the mod folder. |
 | `-WindhawkPath <dir>` | Windhawk install folder; overrides `build.ini`. |
 | `-ModId <id>` | Registry/mod ID. Defaults to `local@<@id>`, the same ID the Windhawk editor uses. |

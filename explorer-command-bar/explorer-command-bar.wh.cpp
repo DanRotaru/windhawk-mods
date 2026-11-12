@@ -25,7 +25,7 @@ buttons, separators and spacing you don't want.
 
 ![Explorer Command Bar demo](https://raw.githubusercontent.com/DanRotaru/windhawk-mods/master/explorer-command-bar/screenshots/main.gif)
 
-Designed for Windows 11 24H2 / 25H2 with the WinAppSDK (WinUI 3) File
+Designed for Windows 11 24H2 / 25H2 / 26H2 with the WinAppSDK (WinUI 3) File
 Explorer.
 
 ---
