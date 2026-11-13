@@ -23,11 +23,13 @@ Designed for 64‑bit Chrome on Windows.
   administrator or in a minimized, maximized or hidden window.
 - **Context placeholders** — pass what you right‑clicked to a custom command:
   `{url}` (link), `{page}`, `{title}`, `{selection}`, `{src}` (image, video or
-  audio) and `{frame}`. For example, `"{url}"` as the arguments of
-  `firefox.exe` opens a link in Firefox, and
-  `https://www.deepl.com/translator#auto/en/{selection}` translates the selected
-  text. Placeholders inside a URL are URL‑encoded. An entry that uses `{url}`,
-  `{selection}` or `{src}` only appears when there is something to pass.
+  audio) and `{frame}` (the clicked frame, or the page outside frames). For
+  example, `"{url}"` as the arguments of `firefox.exe` opens a link in Firefox,
+  and `https://www.deepl.com/translator#auto/en/{selection}` translates the
+  selected text. Placeholders inside a URL are URL‑encoded. An entry that uses
+  `{url}`, `{selection}` or `{src}` only appears when there is something to
+  pass, and one whose address is too long to pass (such as an inline `data:`
+  image) is hidden. See [Placeholders and safety](#placeholders-and-safety).
 - **Per‑site commands** — show a custom command only on matching pages, for
   example `github.com` or `youtube.com/watch*`.
 - **Chrome's original menu on demand** — optionally hold **Ctrl+Alt** while
@@ -52,6 +54,26 @@ Designed for 64‑bit Chrome on Windows.
   icon‑to‑title spacing and extension button width.
 - **No 5 GB download on every update** — hook addresses are prepared once per
   Chrome build and saved (see [How it works](#how-it-works)).
+
+## Placeholders and safety
+
+The page decides the placeholder values, so the mod limits where they can go:
+
+- In **Program, document, or URL**, placeholders work inside a URL you typed
+  (after `://`). A placeholder can also be the whole start of the program, such
+  as `{url}` to open a link in its default app, but then only `http` and
+  `https` addresses are accepted. On other links (`file:`, `mailto:`, app
+  protocols) the entry is hidden, so a page can never pick the program, file or
+  protocol that runs.
+- In **Arguments**, values are quoted for the usual Windows command‑line rules,
+  so `"{selection}"` stays one argument. **Batch files** (`.bat`, `.cmd`),
+  `cmd.exe`, PowerShell, `wsl` and `bash` don't follow those rules and can run
+  page text as commands, so an entry that passes placeholders to one of them is
+  not run (the mod log says why). The same applies to a shortcut or a launcher
+  that starts one of them, which the mod can't detect: don't set those up.
+- A value that starts with `-` is still read as an option by the program, even
+  inside quotes. Put `--` before placeholders if the program supports it, for
+  example `yt-dlp.exe` with `-- "{page}"`.
 
 ## Screenshots
 
