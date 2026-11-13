@@ -32,9 +32,10 @@ Designed for 64‑bit Chrome on Windows.
   image) is hidden. See [Placeholders and safety](#placeholders-and-safety).
 - **Per‑site commands** — show a custom command only on matching pages, for
   example `github.com` or `youtube.com/watch*`.
-- **Chrome's original menu on demand** — optionally hold **Ctrl+Alt** while
-  opening the page menu to see it without the mod's hidden entries, custom
-  commands and groups (off by default).
+- **Chrome's original menu on demand** — optionally hold **Ctrl+Shift** (or a
+  shortcut of your choice) while opening the page menu to see it without the
+  mod's hidden entries, custom commands, groups and appearance changes (on by
+  default).
 - **Custom items group** — optionally put your custom commands into one submenu
   with a label of your choice.
 - **Extensions submenu** — move all extension commands into a single
