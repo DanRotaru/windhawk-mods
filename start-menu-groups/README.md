@@ -49,7 +49,7 @@ Right‑click the groups in Start → **Customize Start Groups** (also added to 
 
 Start apps are picked by name with suggestions from the apps in Start; programs have a file picker. Groups and items can be duplicated, and an app can be added on its own, without a group. **Import** / **Export** at the bottom of the navigation pane save all settings to, or load them from, a JSON file.
 
-The window is hosted by File Explorer — the mod also loads into `explorer.exe` for this, and does nothing else there — because the Start menu process can't host one. It edits the same settings as Windhawk; since Windhawk keeps them in a protected registry key, **Save** shows an administrator (UAC) prompt, and Start updates right after. The portable version of Windhawk isn't supported by the window.
+The window is hosted by File Explorer — the mod also loads into `explorer.exe` for this, and does nothing else there — because the Start menu process can't host one. It edits the same settings as Windhawk. Windhawk keeps them in a protected registry key, so **Save** shows an administrator (UAC) prompt for Windows PowerShell, which imports the new settings, and Start updates right after. The import checks that the settings file is exactly the one the window wrote, so no other program can change what gets saved. If the settings were changed in Windhawk while the window was open, **Save** asks before replacing them. The portable version of Windhawk isn't supported by the window.
 
 ## Tile size and apps in the tile
 
@@ -64,9 +64,19 @@ A group can also hide its app names, its group name, or its tile background (no 
 
 Colors are `#RRGGBB` or `#AARRGGBB`. Leave a color empty to follow the Windows theme and match Start.
 
+## Network access
+
+The mod doesn't connect to the internet by itself, and the default settings don't contact any server: the default websites show a globe icon.
+
+An icon set to an image link (`http://` or `https://`, such as a website's favicon) is downloaded from that address by Windows' XAML image loader: a normal web request for the image, which sends your IP address and a user agent to that server. It happens when Start builds the tiles (when the mod loads, on a theme or settings change, and when a group is opened), and when the settings window shows the item. To avoid it, leave the icon empty or use a local file, a Fluent icon code or an emoji.
+
+## Compatibility
+
+The mod reaches Start's UI directly, without XAML diagnostics, so it works alongside mods and tools that use them, such as Windows 11 Start Menu Styler.
+
 ## Language
 
-The mod finds Start's sections by their English titles (*Pinned*, *Recommended* / *Recent*, *All*) and adds *Customize Start Groups* after *Start settings* in Start's right‑click menu, so it's designed for Windows in English.
+The groups are placed next to Start's pinned list, found by its element name, so they show in any display language. Two things go by Start's English titles: hiding Start's sections (*Pinned*, *Recommended* / *Recent*, *All*), and adding *Customize Start Groups* after *Start settings* in Start's own right‑click menu. In other languages, open the settings window by right‑clicking the groups instead.
 
 ## Default configuration
 
