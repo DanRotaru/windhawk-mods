@@ -5733,8 +5733,11 @@ void SettingsWindow::ShowPage(std::wstring const& tag) {
 }
 
 FrameworkElement SettingsWindow::BuildFieldsPage(SettingsPage const& page) {
+    // The page's full width, as the Groups page. No MaxWidth: as the
+    // ScrollViewer's content, a MaxWidth smaller than the viewport (a wide
+    // window) shifts the page right and clips its controls.
     xc::StackPanel sp;
-    sp.MaxWidth(1000);
+    sp.HorizontalAlignment(HorizontalAlignment::Stretch);
     auto title = Text(page.title, 28);
     title.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
     sp.Children().Append(title);
