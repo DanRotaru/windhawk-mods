@@ -1205,9 +1205,21 @@ bool IsStartOpen(HWND start) {
     if (!start || !IsWindowVisible(start)) {
         return false;
     }
-    BOOL cloaked = FALSE;
+    DWORD cloaked = 0;
     DwmGetWindowAttribute(start, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
-    return !cloaked;  // Start is cloaked while closed
+    // Start is cloaked (by the shell) while closed. Not the mod's own
+    // cloak, which hides it while it closes after a launch.
+    return !(cloaked & ~DWM_CLOAKED_APP);
+}
+
+// Hides or shows Start's window, without closing or opening Start.
+void CloakStart(HWND start, bool cloak) {
+    BOOL value = cloak;
+    HRESULT hr =
+        DwmSetWindowAttribute(start, DWMWA_CLOAK, &value, sizeof(value));
+    if (FAILED(hr)) {
+        Wh_Log(L"Cloaking Start (%d) failed: %08X", cloak, hr);
+    }
 }
 
 // Whether a key or mouse button is held down.
@@ -1220,22 +1232,81 @@ bool AnyKeyDown() {
     return false;
 }
 
-// Start doesn't always close after launching an app: it stays open when
-// the app doesn't come to the front (e.g. Notepad, already running, opening
-// another window). So if it's still open a moment after a launch, close it
-// like the Start key does. Up to `seconds` (longer for an administrator
-// prompt), and only while the normal desktop is in front (not the secure
-// desktop of the prompt).
-void CloseStartAfterLaunch(int seconds = 2) {
-    RunWorker([seconds] {
-        HWND start = FindStartWindow();
-        if (!start) {
-            return;
-        }
-        // Not sooner: Start closing by itself (its animation) can take a
-        // moment, and the Start key would then open it again.
-        for (int waited = 0; waited < seconds * 1000; waited += 250) {
-            if (!WaitOrStop(250)) {
+// The windows an app shows on the taskbar: visible, not cloaked, and not a
+// tool window, a window that's never activated, or an owned window.
+bool IsAppWindow(HWND hwnd) {
+    if (!IsWindowVisible(hwnd)) {
+        return false;
+    }
+    LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    if ((ex & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) ||
+        (GetWindow(hwnd, GW_OWNER) && !(ex & WS_EX_APPWINDOW))) {
+        return false;
+    }
+    BOOL cloaked = FALSE;
+    DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
+    RECT rc;
+    return !cloaked && GetWindowRect(hwnd, &rc) && rc.right > rc.left &&
+           rc.bottom > rc.top;
+}
+
+// The app windows of other processes, sorted.
+std::vector<HWND> OtherAppWindows() {
+    std::vector<HWND> list;
+    EnumWindows(
+        [](HWND hwnd, LPARAM lp) -> BOOL {
+            DWORD pid = 0;
+            GetWindowThreadProcessId(hwnd, &pid);
+            if (pid != GetCurrentProcessId() && IsAppWindow(hwnd)) {
+                ((std::vector<HWND>*)lp)->push_back(hwnd);
+            }
+            return TRUE;
+        },
+        (LPARAM)&list);
+    std::sort(list.begin(), list.end());
+    return list;
+}
+
+// Start doesn't always close after launching an app. Start closes when the
+// app comes to the front, but an app that takes a while to show its window
+// can lose the right to (Windows then only flashes its taskbar button). So
+// while Start is still in front, the first new app window that shows up is
+// brought to the front from here (Start, being in front, may do that), and
+// Start closes as it loses the focus. If none shows up (e.g. Notepad,
+// already running, opening a tab), Start is closed like the Start key does.
+// Up to `seconds` (longer for an administrator prompt), and only while the
+// normal desktop is in front (not the secure desktop of the prompt).
+//
+// Start can't really be closed at once: no key is pressed for that early,
+// as any input takes away the right Windows gave the app to come to the
+// front (AllowLaunchedAppToFront), and Start closing hands the focus back to
+// the window before it, leaving the app behind it. So Start is hidden at
+// once instead (cloaked), and shown again once it's closed.
+void CloseStartAfterLaunch(int seconds = 3) {
+    // Taken now, before the launch, to tell the app's windows apart.
+    auto before = std::make_shared<std::vector<HWND>>(OtherAppWindows());
+    HWND start = FindStartWindow();
+    if (!start || !IsStartOpen(start)) {
+        return;
+    }
+    CloakStart(start, true);
+    RunWorker([seconds, before, start] {
+        // Shown again once Start is closed (its own cloak then hides it),
+        // or still open after all.
+        struct Uncloak {
+            HWND start;
+            ~Uncloak() {
+                for (int i = 0; i < 30 && IsStartOpen(start); i++) {
+                    if (!WaitOrStop(100)) {
+                        break;
+                    }
+                }
+                CloakStart(start, false);
+            }
+        } uncloak{start};
+        constexpr int kStep = 100;
+        for (int waited = kStep; waited <= seconds * 1000; waited += kStep) {
+            if (!WaitOrStop(kStep)) {
                 return;  // the mod is unloading
             }
             if (!IsStartOpen(start)) {
@@ -1247,10 +1318,30 @@ void CloseStartAfterLaunch(int seconds = 2) {
                 GetWindowThreadProcessId(fg, &fgPid);
             }
             // Only while Start itself is in front (else it's closing on its
-            // own, or a prompt is up), and no key is held down, which the
-            // Win key press would turn into a Win+key shortcut.
-            if (waited < 500 || fgPid != GetCurrentProcessId() ||
-                AnyKeyDown()) {
+            // own, or a prompt is up).
+            if (fgPid != GetCurrentProcessId()) {
+                continue;
+            }
+            HWND app = nullptr;
+            for (HWND hwnd : OtherAppWindows()) {
+                if (!std::binary_search(before->begin(), before->end(),
+                                        hwnd)) {
+                    app = hwnd;
+                    break;
+                }
+            }
+            if (app) {
+                if (IsIconic(app)) {
+                    ShowWindow(app, SW_RESTORE);
+                }
+                SetForegroundWindow(app);
+                return;
+            }
+            // The Start key only after a while: not sooner, see above (and
+            // Start closing by itself, its animation, can take a moment,
+            // and the Start key would then open it again). Not while a key
+            // is held down, which it would turn into a Win+key shortcut.
+            if (waited < 1500 || AnyKeyDown()) {
                 continue;
             }
             if (!IsStartOpen(start)) {
