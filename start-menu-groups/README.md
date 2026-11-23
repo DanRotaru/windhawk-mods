@@ -13,7 +13,7 @@ Designed for the Windows 11 Start menu (`StartMenuExperienceHost.exe`).
 - **Custom names and icons** — every item can have its own label and icon: an `.ico`, `.exe`, `.dll` or image file, an image link (such as a website's favicon), a Fluent icon by its code (e.g. `E774`) or an emoji.
 - **Native look** — rounded tiles, borders and colors match Start's own category view and follow the Windows light / dark theme.
 - **Resizable tiles** — give each group its own tile size, from 1 × 1 up to 6 × 4 (24 apps). Bigger tiles take more cells of the group grid. A 1 × 1 tile is a single app on its own, without a group.
-- **Overflow cluster** — when a group has more apps than fit, the last cell shows the rest as small icons; click it to open the whole group.
+- **Overflow cluster** — when a group has more apps than fit, the last cell shows the rest as small icons; click it to open the apps that didn't fit.
 - **Right‑click menu** — right‑click an app in a group for **Edit**, **Run as administrator**, **Open file location**, **Pin to taskbar**, **App settings** and **Uninstall**, like Start's own apps.
 - **Size presets** — Default, Small and Large presets for the tiles, icons and names, plus control over gaps, corner radius, colors and group names.
 - **Placement** — show the groups before or after Pinned, after Recommended / Recent, or after the All section, with an optional section title.

@@ -33,7 +33,7 @@ Designed for the Windows 11 Start menu (`StartMenuExperienceHost.exe`).
 - **Custom names and icons** — every item can have its own label and icon: an `.ico`, `.exe`, `.dll` or image file, an image link (such as a website's favicon), a Fluent icon by its code (e.g. `E774`) or an emoji.
 - **Native look** — rounded tiles, borders and colors match Start's own category view and follow the Windows light / dark theme.
 - **Resizable tiles** — give each group its own tile size, from 1 × 1 up to 6 × 4 (24 apps). Bigger tiles take more cells of the group grid. A 1 × 1 tile is a single app on its own, without a group.
-- **Overflow cluster** — when a group has more apps than fit, the last cell shows the rest as small icons; click it to open the whole group.
+- **Overflow cluster** — when a group has more apps than fit, the last cell shows the rest as small icons; click it to open the apps that didn't fit.
 - **Right‑click menu** — right‑click an app in a group for **Edit**, **Run as administrator**, **Open file location**, **Pin to taskbar**, **App settings** and **Uninstall**, like Start's own apps.
 - **Size presets** — Default, Small and Large presets for the tiles, icons and names, plus control over gaps, corner radius, colors and group names.
 - **Placement** — show the groups before or after Pinned, after Recommended / Recent, or after the All section, with an optional section title.
@@ -1965,7 +1965,11 @@ double FlyoutWidth(int cols, double cell) {
            2;  // + the presenter's border
 }
 
-xc::Flyout BuildGroupFlyout(const Model& model, const Group& cat, int cols) {
+// Shows the group's apps from `first` on: the ones the tile has no room for.
+xc::Flyout BuildGroupFlyout(const Model& model,
+                            const Group& cat,
+                            int cols,
+                            size_t first) {
     const FlyoutLook look = FlyoutLookFor(model.layout.iconSize);
     xc::Flyout fly;
     // Start can only draw inside its own window, so keep the popup within
@@ -2004,15 +2008,17 @@ xc::Flyout BuildGroupFlyout(const Model& model, const Group& cat, int cols) {
         cd.Width(GridLengthHelper::FromPixels(look.cell));
         grid.ColumnDefinitions().Append(cd);
     }
-    int rows = ((int)cat.apps.size() + cols - 1) / cols;
+    first = std::min(first, cat.apps.size());
+    const size_t shown = cat.apps.size() - first;
+    int rows = ((int)shown + cols - 1) / cols;
     for (int r = 0; r < rows; r++) {
         xc::RowDefinition rd;
         rd.Height(GridLengthHelper::Auto());
         grid.RowDefinitions().Append(rd);
     }
 
-    for (size_t i = 0; i < cat.apps.size(); i++) {
-        const auto& app = cat.apps[i];
+    for (size_t i = 0; i < shown; i++) {
+        const auto& app = cat.apps[first + i];
         auto btn = MakeFlatButton();
         btn.Padding(ThicknessHelper::FromLengths(4, 10, 4, 8));
         xc::StackPanel sp;
@@ -2110,18 +2116,23 @@ FrameworkElement BuildTile(const Model& model,
             winrt::Windows::UI::Colors::Transparent()));
     }
 
-    // The opened group, built when it opens: Start can only draw inside the
+    // The opened group (the apps from `first` on, the ones the tile has no
+    // room for), built when it opens: Start can only draw inside the
     // visible menu, but a popup may extend past it (its window is larger),
     // and gets cut there. So it gets only as many columns as fit the groups
     // area and is shifted left to stay inside it.
     // Weak capture: handlers live inside the tile's own subtree.
-    auto showFlyout = [weakTile = winrt::weak_ref<xc::Border>(tile), cat] {
+    auto showFlyout = [weakTile = winrt::weak_ref<xc::Border>(tile),
+                       cat](size_t first) {
         auto t = weakTile.get();
         auto model = g_model;
         if (!t || !model) {
             return;
         }
-        int cols = std::max(1, model->layout.flyoutColumns);
+        // No wider than the apps it shows.
+        int shown = (int)(cat.apps.size() - std::min(first, cat.apps.size()));
+        int cols = std::clamp(shown, 1,
+                              std::max(1, model->layout.flyoutColumns));
         double x = 0, y = t.ActualHeight();
         auto host = g_attach.host;
         if (host && host.XamlRoot() && t.ActualWidth() > 0) {
@@ -2147,7 +2158,7 @@ FrameworkElement BuildTile(const Model& model,
             } catch (...) {
             }
         }
-        auto fly = BuildGroupFlyout(*model, cat, cols);
+        auto fly = BuildGroupFlyout(*model, cat, cols, first);
         xcp::FlyoutShowOptions opts;
         opts.Position(winrt::Windows::Foundation::Point{(float)x, (float)y});
         opts.Placement(xcp::FlyoutPlacementMode::BottomEdgeAlignedLeft);
@@ -2239,7 +2250,9 @@ FrameworkElement BuildTile(const Model& model,
         xc::ToolTipService::SetToolTip(
             btn, winrt::box_value(winrt::hstring(
                      L"+" + std::to_wstring(count - singles) + L" more")));
-        btn.Click([showFlyout](auto&&, auto&&) { showFlyout(); });
+        btn.Click([showFlyout, singles](auto&&, auto&&) {
+            showFlyout((size_t)singles);
+        });
         xc::Grid::SetRow(btn, (cells - 1) / previewColumns);
         xc::Grid::SetColumn(btn, (cells - 1) % previewColumns);
         grid.Children().Append(btn);
