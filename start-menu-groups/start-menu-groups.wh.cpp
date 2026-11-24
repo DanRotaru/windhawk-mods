@@ -64,7 +64,7 @@ Changes apply to Start as soon as you click **Save settings**.
 
 Right‑click the groups in Start → **Customize Start Groups** (also added to Start's own right‑click menu, after *Start settings*) opens a settings window with the same settings, but easier to edit:
 
-* **Groups** — shows the groups the way Start does. Drag apps to reorder them or move them to another group, drag a tile to reorder the groups, drag a tile's corner to resize it, and drag apps from the All Apps list onto a tile to add them. **Add app → Folder** adds a folder: drop apps onto it to put them in, and double‑click it to open it, then add, reorder or drag apps back out. The selected group and app are edited below the groups. Right‑click a tile to rename, duplicate or delete it.
+* **Groups** — shows the groups the way Start does. Drag apps to reorder them or move them to another group, drag a tile to reorder the groups, drag a tile's corner to resize it, and drag apps from the All Apps list onto a tile to add them. **Add app → Folder** adds a folder, and dropping an app onto the middle of another app puts both in a new folder: drop apps onto it to put them in, and click it to open it, then reorder or drag apps back out. The selected group and app are edited below the groups. Right‑click a tile to rename, duplicate or delete it.
 * **Customization** — the size preset (Default, Small, Large), gaps, corner radius, colors and group names.
 * **Behavior** — placement, section title, app names, tooltips, sorting and columns.
 * **Built‑in sections** — hide Start's own Pinned, Recommended and All sections.
@@ -79,12 +79,13 @@ The groups can be rearranged right in Start, with the mouse:
 
 * **Move a group** — drag its tile by its background (between the apps), or drag an app on its own (a 1 × 1 tile), and drop it before or after another tile.
 * **Move an app** — drag it within its group to reorder it, or onto another group to move it there. Dropped on a group's overflow cluster, it goes at the end of the group. Dropped outside the tiles (between them, or below the last one), it becomes an app on its own (a 1 × 1 tile) there, as in the settings window. An app on its own dropped onto a group goes into that group. With *Sort apps by name* on, apps keep their sorted order, so they can only be moved to another group.
+* **Folders** — drop an app onto the middle of another app to put both in a new folder, or onto a folder to add it. In an opened folder or group, drag its apps to reorder them, or out of it to drop them anywhere on the groups.
 
 The new order shows right away and stays: Start keeps it in the mod's own storage, which needs no administrator prompt. Windhawk's **Settings** tab still shows the order from before. The settings window shows Start's order, and saving there writes it into the mod's settings (and Start's order is then no longer kept on its own).
 
 Changes made in Windhawk are kept as well: Start's order is applied on top of them, matching groups by name and apps by their settings. New groups and apps go where they are in the settings. A drag in Start made while the settings window is open is replaced by what the window saves.
 
-Not supported in Start (use the settings window): resizing tiles, adding or removing apps, making an app on its own into a group or dropping an app onto it, rearranging the apps of an opened group or folder, moving apps into or out of a folder, and dragging with touch.
+Not supported in Start (use the settings window): resizing tiles, adding or removing apps, making an app on its own into a group, renaming folders, and dragging with touch.
 
 ## Tile size and apps in the tile
 
@@ -449,6 +450,8 @@ Empty groups are hidden. None of Start's own sections are hidden by default. Eve
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <optional>
+#include <tuple>
 #include <vector>
 
 #undef GetCurrentTime
@@ -543,6 +546,7 @@ struct AppEntry {
     // ItemSetting::rawGroup): what a drag in Start moves.
     int rawGroup = -1;
     int rawItem = -1;
+    int rawSub = -1;
 };
 
 // A group item as configured.
@@ -558,9 +562,12 @@ struct ItemSetting {
     std::vector<ItemSetting> children;
     // Where it is in the saved settings, before the order arranged in Start
     // is applied (see "Order arranged in Start"). Stays the same while it's
-    // moved around in Start, until the settings are read again.
+    // moved around in Start, until the settings are read again. An app in a
+    // folder: rawSub, its index there (-1: an item of the group). A folder
+    // made in Start: rawGroup -1, rawItem -2, -3, ...
     int rawGroup = -1;
     int rawItem = -1;
+    int rawSub = -1;
 };
 
 // A folder's name when it has no label of its own.
@@ -688,6 +695,7 @@ struct ModSettings {
     // are read: raw indices of one reading don't apply to another.
     std::vector<std::wstring> rawGroupKeys;
     std::vector<std::vector<std::wstring>> rawItemKeys;
+    std::vector<std::vector<std::vector<std::wstring>>> rawChildKeys;
     int generation = 0;
     // Where the groups go among Start's sections: afterPinned, beforePinned,
     // afterRecent or afterAll.
@@ -715,14 +723,17 @@ ModSettings g_settings;
 // It's the order of the groups and of each group's items, by key: a group by
 // its name, an item by all of its settings (each with the number of earlier
 // ones alike, for duplicates), so it still fits after the settings change in
-// Windhawk. Groups and items it doesn't list (new ones) stay where they are
-// in the settings; keys that are no longer there are skipped.
+// Windhawk; an app in a folder by its folder's key and its own settings.
+// Groups and items it doesn't list (new ones) stay where they are in the
+// settings; keys that are no longer there are skipped.
 //
 // Stored as lines: a "v1" header, then "g\t<key>" for a group followed by
-// "i\t<key>" for each of its items. An app dragged out of its group in
-// Start gets a group of its own there (an app on its own, 1 x 1): that's
-// "n\t<name>" instead of "g", followed by its item. Dropped when its items
-// are gone.
+// "i\t<key>" for each of its items. A folder's item is followed by
+// "c\t<key>" for each of its apps (apps of a folder not listed stay in it).
+// Made in Start: an app dragged out of its group gets a group of its own
+// (an app on its own, 1 x 1), "n\t<name>" instead of "g"; an app dropped
+// onto another makes a folder of the two, "f\t<name>" instead of "i".
+// Either is dropped when its apps are gone.
 
 constexpr PCWSTR kStartOrderValue = L"startOrder";
 
@@ -737,6 +748,12 @@ std::vector<std::wstring> OrderGroupKeys(std::vector<G> const& groups) {
     return keys;
 }
 
+// An item's settings, for its key.
+std::wstring ItemKeyBase(ItemSetting const& it) {
+    return it.type + L'\x1F' + it.app + L'\x1F' + it.path + L'\x1F' +
+           it.args + L'\x1F' + it.label + L'\x1F' + it.icon;
+}
+
 template <typename G>
 std::vector<std::vector<std::wstring>> OrderItemKeys(
     std::vector<G> const& groups) {
@@ -745,11 +762,31 @@ std::vector<std::vector<std::wstring>> OrderItemKeys(
     for (auto const& g : groups) {
         auto& list = keys.emplace_back();
         for (auto const& it : g.items) {
-            std::wstring c = it.type + L'\x1F' + it.app + L'\x1F' + it.path +
-                             L'\x1F' + it.args + L'\x1F' + it.label + L'\x1F' +
-                             it.icon;
+            std::wstring c = ItemKeyBase(it);
             int n = seen[c]++;
             list.push_back(c + L'\x1F' + std::to_wstring(n));
+        }
+    }
+    return keys;
+}
+
+// The keys of the folders' apps: [group][item][app].
+using ChildKeys = std::vector<std::vector<std::vector<std::wstring>>>;
+template <typename G>
+ChildKeys OrderChildKeys(std::vector<G> const& groups) {
+    auto items = OrderItemKeys(groups);
+    ChildKeys keys;
+    for (size_t g = 0; g < groups.size(); g++) {
+        auto& gl = keys.emplace_back();
+        for (size_t i = 0; i < groups[g].items.size(); i++) {
+            auto& list = gl.emplace_back();
+            std::unordered_map<std::wstring, int> seen;
+            for (auto const& c : groups[g].items[i].children) {
+                std::wstring base = ItemKeyBase(c);
+                int n = seen[base]++;
+                list.push_back(items[g][i] + L'\x1E' + base + L'\x1F' +
+                               std::to_wstring(n));
+            }
         }
     }
     return keys;
@@ -796,16 +833,31 @@ std::wstring UnescapeOrderKey(std::wstring_view s) {
     return out;
 }
 
-// The order: the groups by their raw (saved) index, each with its items as
-// raw (group, item) indices.
+// An item as saved: group, item and, for an app in a folder, its index
+// there (-1: the item itself).
+struct OrderedRef {
+    int g = -1, i = -1, sub = -1;
+    bool operator==(OrderedRef const&) const = default;
+};
+
+// An item in the order: a saved one (ref), or a folder made in Start
+// (ref.g -1, named newName). A folder's apps are `children`.
+struct OrderedItem {
+    OrderedRef ref;
+    bool folder = false;
+    std::wstring newName;
+    std::vector<OrderedRef> children;
+};
+
+// The order: the groups by their raw (saved) index, each with its items.
 struct OrderedGroup {
     int group;  // -1: made in Start (an app on its own, named newName)
-    std::vector<std::pair<int, int>> items;
+    std::vector<OrderedItem> items;
     std::wstring newName;
 };
 
 // The order `value` gives the groups as saved (`raw`). Always every group and
-// every item, each once.
+// every item (and every app of a folder), each once.
 template <typename G>
 std::vector<OrderedGroup> PlanStartOrder(std::vector<G> const& raw,
                                          std::wstring const& value) {
@@ -813,22 +865,44 @@ std::vector<OrderedGroup> PlanStartOrder(std::vector<G> const& raw,
     std::vector<OrderedGroup> plan;
     std::vector<char> groupUsed(n);
     std::vector<std::vector<char>> itemUsed(n);
+    std::vector<std::vector<std::vector<char>>> childUsed(n);
     for (int g = 0; g < n; g++) {
         itemUsed[g].resize(raw[g].items.size());
+        childUsed[g].resize(raw[g].items.size());
+        for (int i = 0; i < (int)raw[g].items.size(); i++) {
+            childUsed[g][i].resize(raw[g].items[i].children.size());
+        }
     }
+    auto isFolder = [&](OrderedRef r) {
+        return r.sub < 0 && raw[r.g].items[r.i].type == L"folder";
+    };
+    auto use = [&](OrderedRef r) -> bool {
+        char& u = r.sub < 0 ? itemUsed[r.g][r.i] : childUsed[r.g][r.i][r.sub];
+        if (u) {
+            return false;
+        }
+        u = 1;
+        return true;
+    };
 
     if (value.rfind(L"v1\n", 0) == 0) {
         auto groupKeys = OrderGroupKeys(raw);
         auto itemKeys = OrderItemKeys(raw);
+        auto childKeys = OrderChildKeys(raw);
         std::unordered_map<std::wstring, int> groupByKey;
-        std::unordered_map<std::wstring, std::pair<int, int>> itemByKey;
+        std::unordered_map<std::wstring, OrderedRef> itemByKey;
         for (int g = 0; g < n; g++) {
             groupByKey.emplace(groupKeys[g], g);
             for (int i = 0; i < (int)itemKeys[g].size(); i++) {
-                itemByKey.emplace(itemKeys[g][i], std::pair{g, i});
+                itemByKey.emplace(itemKeys[g][i], OrderedRef{g, i, -1});
+                for (int c = 0; c < (int)childKeys[g][i].size(); c++) {
+                    itemByKey.emplace(childKeys[g][i][c], OrderedRef{g, i, c});
+                }
             }
         }
-        OrderedGroup* cur = nullptr;
+        // Indices, not pointers: the vectors grow.
+        int cur = -1;        // group in plan
+        int curFolder = -1;  // folder item in plan[cur]
         size_t pos = 3;
         while (pos < value.size()) {
             size_t end = value.find(L'\n', pos);
@@ -841,23 +915,46 @@ std::vector<OrderedGroup> PlanStartOrder(std::vector<G> const& raw,
                 continue;
             }
             std::wstring key = UnescapeOrderKey(line.substr(2));
-            if (line[0] == L'g') {
-                cur = nullptr;
+            WCHAR kind = line[0];
+            if (kind == L'g') {
+                cur = -1;
+                curFolder = -1;
                 auto it = groupByKey.find(key);
                 if (it != groupByKey.end() && !groupUsed[it->second]) {
                     groupUsed[it->second] = 1;
-                    cur = &plan.emplace_back(OrderedGroup{it->second, {}});
+                    plan.push_back(OrderedGroup{it->second, {}, {}});
+                    cur = (int)plan.size() - 1;
                 }
-            } else if (line[0] == L'n') {
-                cur = &plan.emplace_back(OrderedGroup{-1, {}, key});
-            } else if (line[0] == L'i' && cur) {
+            } else if (kind == L'n') {
+                plan.push_back(OrderedGroup{-1, {}, key});
+                cur = (int)plan.size() - 1;
+                curFolder = -1;
+            } else if (cur < 0) {
+                continue;
+            } else if (kind == L'i') {
+                curFolder = -1;
                 auto it = itemByKey.find(key);
-                if (it != itemByKey.end()) {
-                    auto [g, i] = it->second;
-                    if (!itemUsed[g][i]) {
-                        itemUsed[g][i] = 1;
-                        cur->items.push_back(it->second);
+                if (it != itemByKey.end() && use(it->second)) {
+                    OrderedItem item;
+                    item.ref = it->second;
+                    item.folder = isFolder(it->second);
+                    plan[cur].items.push_back(std::move(item));
+                    if (item.folder) {
+                        curFolder = (int)plan[cur].items.size() - 1;
                     }
+                }
+            } else if (kind == L'f') {
+                OrderedItem item;
+                item.folder = true;
+                item.newName = key;
+                plan[cur].items.push_back(std::move(item));
+                curFolder = (int)plan[cur].items.size() - 1;
+            } else if (kind == L'c' && curFolder >= 0) {
+                // Folders don't nest.
+                auto it = itemByKey.find(key);
+                if (it != itemByKey.end() && !isFolder(it->second) &&
+                    use(it->second)) {
+                    plan[cur].items[curFolder].children.push_back(it->second);
                 }
             }
         }
@@ -875,7 +972,7 @@ std::vector<OrderedGroup> PlanStartOrder(std::vector<G> const& raw,
                 break;
             }
         }
-        plan.insert(plan.begin() + at, OrderedGroup{g, {}});
+        plan.insert(plan.begin() + at, OrderedGroup{g, {}, {}});
         groupUsed[g] = 1;
     }
     // Items it doesn't list: at the end of their own group.
@@ -884,13 +981,34 @@ std::vector<OrderedGroup> PlanStartOrder(std::vector<G> const& raw,
             continue;
         }
         for (int i = 0; i < (int)raw[og.group].items.size(); i++) {
-            if (!itemUsed[og.group][i]) {
-                itemUsed[og.group][i] = 1;
-                og.items.push_back({og.group, i});
+            if (use({og.group, i, -1})) {
+                OrderedItem item;
+                item.ref = {og.group, i, -1};
+                item.folder = isFolder(item.ref);
+                og.items.push_back(std::move(item));
             }
         }
     }
-    // Groups made in Start whose apps are all gone.
+    // Apps of a folder it doesn't list: at the end of their folder.
+    for (auto& og : plan) {
+        for (auto& item : og.items) {
+            if (!item.folder || item.ref.g < 0) {
+                continue;
+            }
+            auto const& f = raw[item.ref.g].items[item.ref.i];
+            for (int c = 0; c < (int)f.children.size(); c++) {
+                if (use({item.ref.g, item.ref.i, c})) {
+                    item.children.push_back({item.ref.g, item.ref.i, c});
+                }
+            }
+        }
+    }
+    // Made in Start, with all of their apps gone.
+    for (auto& og : plan) {
+        std::erase_if(og.items, [](OrderedItem const& item) {
+            return item.ref.g < 0 && item.children.empty();
+        });
+    }
     std::erase_if(plan, [](OrderedGroup const& og) {
         return og.group < 0 && og.items.empty();
     });
@@ -898,19 +1016,45 @@ std::vector<OrderedGroup> PlanStartOrder(std::vector<G> const& raw,
 }
 
 // The groups in the order `plan` gives them. A group made in Start is set up
-// by MakeStartGroup (an overload for each G, found when this is used).
+// by MakeStartGroup (an overload for each G, found when this is used). A
+// folder made in Start gets rawGroup -1 and rawItem -2, -3, ..., which tells
+// them apart (see ItemSetting::rawSub).
 template <typename G>
 std::vector<G> ApplyStartOrder(std::vector<G> const& raw,
                                std::vector<OrderedGroup> const& plan) {
     std::vector<G> out;
     out.reserve(plan.size());
-    int made = 0;
+    int made = 0, madeFolders = 0;
+    auto at = [&](OrderedRef r) -> ItemSetting const& {
+        auto const& item = raw[r.g].items[r.i];
+        return r.sub < 0 ? item : item.children[r.sub];
+    };
     for (auto const& og : plan) {
         G g = og.group >= 0 ? raw[og.group]
                             : MakeStartGroup(og.newName, made++, (G*)nullptr);
         g.items.clear();
-        for (auto [gi, ii] : og.items) {
-            g.items.push_back(raw[gi].items[ii]);
+        for (auto const& oi : og.items) {
+            ItemSetting item;
+            if (oi.ref.g >= 0) {
+                item = at(oi.ref);
+            } else {
+                item.type = L"folder";
+                item.label = oi.newName;
+                item.rawGroup = -1;
+                item.rawItem = -2 - madeFolders++;
+            }
+            if (oi.folder) {
+                item.children.clear();
+                for (auto r : oi.children) {
+                    item.children.push_back(at(r));
+                }
+                // A folder whose apps were all dragged out of it in Start.
+                if (item.children.empty() && oi.ref.g >= 0 &&
+                    !at(oi.ref).children.empty()) {
+                    continue;
+                }
+            }
+            g.items.push_back(std::move(item));
         }
         // An app on its own whose app was dragged into a group in Start.
         if (g.items.empty() && og.group >= 0 &&
@@ -928,6 +1072,23 @@ std::wstring StartOrderValue(ModSettings const& s) {
     const int n = (int)s.rawGroupKeys.size();
     bool same = (int)s.groups.size() == n;
     std::wstring out = L"v1\n";
+    // An item's key; false if it isn't one of the saved ones.
+    auto key = [&](ItemSetting const& it, std::wstring& k) {
+        if (it.rawGroup < 0 || it.rawGroup >= n || it.rawItem < 0 ||
+            it.rawItem >= (int)s.rawItemKeys[it.rawGroup].size()) {
+            return false;
+        }
+        if (it.rawSub < 0) {
+            k = s.rawItemKeys[it.rawGroup][it.rawItem];
+            return true;
+        }
+        auto const& c = s.rawChildKeys[it.rawGroup][it.rawItem];
+        if (it.rawSub >= (int)c.size()) {
+            return false;
+        }
+        k = c[it.rawSub];
+        return true;
+    };
     for (int k = 0; k < (int)s.groups.size(); k++) {
         auto const& g = s.groups[k];
         if (g.raw >= n) {
@@ -944,14 +1105,34 @@ std::wstring StartOrderValue(ModSettings const& s) {
         }
         for (int j = 0; j < (int)g.items.size(); j++) {
             auto const& it = g.items[j];
-            if (it.rawGroup < 0 || it.rawGroup >= n || it.rawItem < 0 ||
-                it.rawItem >= (int)s.rawItemKeys[it.rawGroup].size()) {
+            std::wstring itemKey;
+            if (it.rawGroup < 0 && it.type == L"folder") {
+                // Made in Start.
+                same = false;
+                out += L"f\t" + EscapeOrderKey(it.label) + L"\n";
+            } else if (key(it, itemKey)) {
+                same = same && it.rawGroup == k && it.rawItem == j &&
+                       it.rawSub < 0;
+                out += L"i\t" + EscapeOrderKey(itemKey) + L"\n";
+            } else {
                 return L"";
             }
-            same = same && it.rawGroup == k && it.rawItem == j;
-            out += L"i\t" +
-                   EscapeOrderKey(s.rawItemKeys[it.rawGroup][it.rawItem]) +
-                   L"\n";
+            if (it.type != L"folder") {
+                continue;
+            }
+            same = same && it.rawSub < 0 && it.rawGroup == k &&
+                   it.rawItem == j &&
+                   it.children.size() == s.rawChildKeys[k][j].size();
+            for (int c = 0; c < (int)it.children.size(); c++) {
+                auto const& child = it.children[c];
+                std::wstring childKey;
+                if (!key(child, childKey)) {
+                    return L"";
+                }
+                same = same && child.rawGroup == k && child.rawItem == j &&
+                       child.rawSub == c;
+                out += L"c\t" + EscapeOrderKey(childKey) + L"\n";
+            }
         }
     }
     return same ? L"" : out;
@@ -1240,6 +1421,45 @@ struct StartDrag {
     // An app on its own (a group drag) into the group targetTile, as an app
     // drag goes; its own tile goes.
     bool intoGroup = false;
+    // Onto the app targetApp: a folder of the two (makeFolder), or into it,
+    // a folder (intoFolder), before or after its app targetChild (-1: last).
+    bool makeFolder = false;
+    bool intoFolder = false;
+    int targetChild = -1;
+    // An app of the folder `app` (its index there), dragged out of the
+    // opened folder.
+    int child = -1;
+    // In the opened folder or group (StartFlyout), until it's dragged out.
+    bool inFlyout = false;
+};
+
+// An app's identity in the settings (see ItemSetting::rawSub).
+using RawId = std::tuple<int, int, int>;
+RawId IdOf(AppEntry const& a) {
+    return {a.rawGroup, a.rawItem, a.rawSub};
+}
+RawId IdOf(ItemSetting const& a) {
+    return {a.rawGroup, a.rawItem, a.rawSub};
+}
+
+// The opened group or folder in Start (BuildGroupFlyout), for dragging its
+// apps (see "Rearranging in Start"): the apps of group `tile`, from `first`
+// on, or of its folder `folder` (an app index).
+struct StartFlyout {
+    std::shared_ptr<Model> model;
+    int tile = -1;
+    int folder = -1;
+    size_t first = 0;
+    int cols = 1;
+    // To find it again in a rebuilt model (RefreshStartFlyout).
+    int groupRaw = -1;
+    RawId folderId{-1, -1, -1};
+    winrt::weak_ref<FrameworkElement> anchor;
+    winrt::weak_ref<xc::Flyout> fly;
+    winrt::weak_ref<xc::Grid> root;  // drag coordinates are relative to it
+    winrt::weak_ref<xc::Canvas> overlay;
+    // Its apps' buttons, with their index in the list shown.
+    std::vector<std::pair<winrt::weak_ref<xc::Button>, int>> items;
 };
 
 // Everything below holds XAML objects of Start's UI thread. They're released
@@ -1284,6 +1504,7 @@ struct Attachment {
     winrt::weak_ref<xc::Grid> dragRoot;
     winrt::weak_ref<xc::Canvas> dragOverlay;
     StartDrag drag;
+    StartFlyout flyout;
     // The left inset of Start's "Pinned" title: the groups' spacing left and
     // right unless set (see HostMargin).
     double inset = 0;
@@ -2247,6 +2468,9 @@ std::shared_ptr<Model> LoadModel() {
                     if (self(self, child, c)) {
                         c.settingsGroup = (int)gi;
                         c.settingsItem = entry.settingsItem;
+                        c.rawGroup = child.rawGroup;
+                        c.rawItem = child.rawItem;
+                        c.rawSub = child.rawSub;
                         entry.children.push_back(std::move(c));
                     }
                 }
@@ -2316,6 +2540,7 @@ std::shared_ptr<Model> LoadModel() {
                 entry.settingsItem = (int)ii;
                 entry.rawGroup = cs.items[ii].rawGroup;
                 entry.rawItem = cs.items[ii].rawItem;
+                entry.rawSub = cs.items[ii].rawSub;
                 cat.apps.push_back(std::move(entry));
             }
         }
@@ -2802,7 +3027,11 @@ void ShowAppsFlyout(FrameworkElement const& anchor,
                     wf::Rect origin,
                     std::wstring const& title,
                     std::vector<AppEntry> const& apps,
-                    size_t first);
+                    size_t first,
+                    int tile = -1,
+                    int folder = -1);
+void HookStartFlyoutDrag(xc::Grid const& root);
+void RequestSettingsWindow(int group, int item);
 
 // Shows `fly` at `anchor`, centered over `area` (window coordinates) when
 // its full `size` is known, else below the anchor; growing out of `origin`
@@ -2832,33 +3061,35 @@ void ShowCenteredOver(xc::Flyout const& fly,
     fly.ShowAt(anchor, opts);
 }
 
-// An opened group or folder: `apps` from `first` on (for a group, the ones
-// its tile has no room for), under `titleText`, in `cols` columns. A folder
-// in it opens in its place, tied to `anchor` (the tile).
-xc::Flyout BuildGroupFlyout(const Model& model,
-                            std::wstring const& titleText,
-                            std::vector<AppEntry> const& apps,
-                            int cols,
-                            size_t first,
-                            winrt::weak_ref<FrameworkElement> anchor) {
+// The content of an opened group or folder (see BuildGroupFlyout), for
+// `fly`. Its apps can be dragged (StartFlyout) when it shows those of the
+// group `tile` of g_model (or of its folder `folder`).
+xc::Grid BuildGroupFlyoutContent(xc::Flyout const& fly,
+                                 const Model& model,
+                                 std::wstring const& titleText,
+                                 std::vector<AppEntry> const& apps,
+                                 int cols,
+                                 size_t first,
+                                 winrt::weak_ref<FrameworkElement> anchor,
+                                 int tile,
+                                 int folder) {
     const FlyoutLook look = FlyoutLookFor(model.layout.iconSize);
-    xc::Flyout fly;
-    // Start can only draw inside its own window, so keep the popup within
-    // its bounds (it's shifted in instead of being cut off at the edge).
-    // It's placed by its top left (see ShowAppsFlyout).
-    fly.ShouldConstrainToRootBounds(true);
-    fly.Placement(xcp::FlyoutPlacementMode::BottomEdgeAlignedLeft);
-    // Flyouts have a default max size (~456 wide) that would cut the grid.
-    Style presenterStyle(winrt::xaml_typename<xc::FlyoutPresenter>());
-    presenterStyle.Setters().Append(
-        Setter(FrameworkElement::MaxWidthProperty(), winrt::box_value(10000.0)));
-    presenterStyle.Setters().Append(Setter(FrameworkElement::MaxHeightProperty(),
-                                           winrt::box_value(10000.0)));
-    presenterStyle.Setters().Append(Setter(
-        xc::Control::PaddingProperty(),
-        winrt::box_value(ThicknessHelper::FromUniformLength(kFlyoutPad))));
-    fly.FlyoutPresenterStyle(presenterStyle);
-    TrackFlyout(fly);
+    bool draggable = tile >= 0 && g_model && g_model.get() == &model &&
+                     tile < (int)model.groups.size();
+    StartFlyout fs;
+    if (draggable) {
+        fs.model = g_model;
+        fs.tile = tile;
+        fs.folder = folder;
+        fs.first = first;
+        fs.cols = cols;
+        fs.groupRaw = model.groups[tile].rawGroup;
+        if (folder >= 0 && folder < (int)model.groups[tile].apps.size()) {
+            fs.folderId = IdOf(model.groups[tile].apps[folder]);
+        }
+        fs.anchor = anchor;
+        fs.fly = fly;
+    }
 
     xc::Grid root;
     root.RowSpacing(12);
@@ -2923,8 +3154,11 @@ xc::Flyout BuildGroupFlyout(const Model& model,
         btn.Content(sp);
         SetAppTooltip(btn, tb, app.name, model.layout);
         winrt::weak_ref<xc::Flyout> weakFly = fly;
-        btn.Click([app, weakFly, anchor](wf::IInspectable const& sender,
-                                         auto&&) {
+        // A folder of the group (in its opened view) opens as one of it.
+        int index = (int)(first + i);
+        int folderTile = draggable && folder < 0 ? tile : -1;
+        btn.Click([app, weakFly, anchor, folderTile, index](
+                      wf::IInspectable const& sender, auto&&) {
             // A folder opens from this cell: taken before this popup starts
             // shrinking away.
             auto origin = RootRect(sender.try_as<FrameworkElement>());
@@ -2934,9 +3168,13 @@ xc::Flyout BuildGroupFlyout(const Model& model,
             if (!app.folder) {
                 LaunchApp(app);
             } else if (auto a = anchor.get()) {
-                ShowAppsFlyout(a, origin, app.name, app.children, 0);
+                ShowAppsFlyout(a, origin, app.name, app.children, 0,
+                               folderTile, folderTile >= 0 ? index : -1);
             }
         });
+        if (draggable) {
+            fs.items.emplace_back(btn, index);
+        }
         btn.ContextFlyout(BuildAppMenu(app));
         xc::Grid::SetRow(btn, (int)(i / cols));
         xc::Grid::SetColumn(btn, (int)(i % cols));
@@ -2948,8 +3186,135 @@ xc::Flyout BuildGroupFlyout(const Model& model,
     sv.Content(grid);
     xc::Grid::SetRow(sv, 1);
     root.Children().Append(sv);
-    fly.Content(root);
+    // Right-click on its empty space: Edit, the settings window with the
+    // folder (or the group) selected. Its apps have their own menus.
+    if (draggable) {
+        auto const& cat = model.groups[tile];
+        int editGroup = -1, editItem = -1;
+        if (folder >= 0 && folder < (int)cat.apps.size()) {
+            editGroup = cat.apps[folder].settingsGroup;
+            editItem = cat.apps[folder].settingsItem;
+        } else if (!cat.apps.empty()) {
+            editGroup = cat.apps.front().settingsGroup;
+        }
+        if (editGroup >= 0) {
+            // A background, so the empty space gets the right click.
+            root.Background(
+                xm::SolidColorBrush(winrt::Windows::UI::Colors::Transparent()));
+            xc::MenuFlyout menu;
+            xc::MenuFlyoutItem mi;
+            mi.Text(L"Edit");
+            xc::FontIcon icon;
+            icon.Glyph(L"\uE70F");
+            mi.Icon(icon);
+            winrt::weak_ref<xc::Flyout> weakFly = fly;
+            mi.Click([editGroup, editItem, weakFly](auto&&, auto&&) {
+                if (auto f = weakFly.get()) {
+                    f.Hide();
+                }
+                RequestSettingsWindow(editGroup, editItem);
+            });
+            menu.Items().Append(mi);
+            TrackFlyout(menu);
+            root.ContextFlyout(menu);
+        }
+    }
+    if (draggable) {
+        // A layer on top for dragging (see "Rearranging in Start").
+        xc::Canvas overlay;
+        overlay.IsHitTestVisible(false);
+        xc::Grid::SetRowSpan(overlay, 2);
+        root.Children().Append(overlay);
+        fs.root = root;
+        fs.overlay = overlay;
+        g_attach.flyout = std::move(fs);
+        HookStartFlyoutDrag(root);
+    }
+    return root;
+}
+
+// An opened group or folder: `apps` from `first` on (for a group, the ones
+// its tile has no room for), under `titleText`, in `cols` columns. A folder
+// in it opens in its place, tied to `anchor` (the tile). See
+// BuildGroupFlyoutContent for `tile` and `folder`.
+xc::Flyout BuildGroupFlyout(const Model& model,
+                            std::wstring const& titleText,
+                            std::vector<AppEntry> const& apps,
+                            int cols,
+                            size_t first,
+                            winrt::weak_ref<FrameworkElement> anchor,
+                            int tile,
+                            int folder) {
+    xc::Flyout fly;
+    // Start can only draw inside its own window, so keep the popup within
+    // its bounds (it's shifted in instead of being cut off at the edge).
+    // It's placed by its top left (see ShowAppsFlyout).
+    fly.ShouldConstrainToRootBounds(true);
+    fly.Placement(xcp::FlyoutPlacementMode::BottomEdgeAlignedLeft);
+    // Flyouts have a default max size (~456 wide) that would cut the grid.
+    Style presenterStyle(winrt::xaml_typename<xc::FlyoutPresenter>());
+    presenterStyle.Setters().Append(
+        Setter(FrameworkElement::MaxWidthProperty(), winrt::box_value(10000.0)));
+    presenterStyle.Setters().Append(Setter(FrameworkElement::MaxHeightProperty(),
+                                           winrt::box_value(10000.0)));
+    presenterStyle.Setters().Append(Setter(
+        xc::Control::PaddingProperty(),
+        winrt::box_value(ThicknessHelper::FromUniformLength(kFlyoutPad))));
+    fly.FlyoutPresenterStyle(presenterStyle);
+    TrackFlyout(fly);
+    fly.Content(BuildGroupFlyoutContent(fly, model, titleText, apps, cols,
+                                        first, anchor, tile, folder));
     return fly;
+}
+
+// The opened group or folder again, after its apps were rearranged in it
+// (ApplyStartDrop): from the rebuilt model, at the same size.
+void RefreshStartFlyout() {
+    auto& fs = g_attach.flyout;
+    auto fly = fs.fly.get();
+    auto oldRoot = fs.root.get();
+    auto model = g_model;
+    if (!fly || !oldRoot || !model) {
+        return;
+    }
+    int tile = -1;
+    for (int k = 0; k < (int)model->groups.size(); k++) {
+        if (model->groups[k].rawGroup == fs.groupRaw) {
+            tile = k;
+            break;
+        }
+    }
+    int folder = -1;
+    if (tile >= 0 && fs.folder >= 0) {
+        auto const& apps = model->groups[tile].apps;
+        for (int i = 0; i < (int)apps.size(); i++) {
+            if (apps[i].folder && IdOf(apps[i]) == fs.folderId) {
+                folder = i;
+                break;
+            }
+        }
+    }
+    if (tile < 0 || (fs.folder >= 0 && folder < 0)) {
+        fly.Hide();
+        return;
+    }
+    auto const& cat = model->groups[tile];
+    auto const& apps = folder >= 0 ? cat.apps[folder].children : cat.apps;
+    std::wstring title = folder >= 0 ? cat.apps[folder].name : cat.name;
+    // Tied to the group's new tile.
+    winrt::weak_ref<FrameworkElement> anchor = fs.anchor;
+    for (auto const& t : g_attach.tiles) {
+        if (t.group == tile) {
+            if (auto el = t.tile.get()) {
+                anchor = winrt::make_weak(el.as<FrameworkElement>());
+            }
+            break;
+        }
+    }
+    auto root = BuildGroupFlyoutContent(fly, *model, title, apps, fs.cols,
+                                        fs.first, anchor, tile, folder);
+    root.Height(oldRoot.Height());
+    fly.Content(root);
 }
 
 // Opens a group's or folder's apps (BuildGroupFlyout), tied to `anchor`
@@ -2961,7 +3326,9 @@ void ShowAppsFlyout(FrameworkElement const& anchor,
                     wf::Rect origin,
                     std::wstring const& title,
                     std::vector<AppEntry> const& apps,
-                    size_t first) {
+                    size_t first,
+                    int tile,
+                    int folder) {
     auto t = anchor;
     auto model = g_model;
     if (!t || !model) {
@@ -2977,7 +3344,7 @@ void ShowAppsFlyout(FrameworkElement const& anchor,
         }
     }
     auto fly = BuildGroupFlyout(*model, title, apps, cols, first,
-                                winrt::make_weak(t));
+                                winrt::make_weak(t), tile, folder);
 
     // Its height: measured with the apps it has, plus empty rows up to
     // kFlyoutMinRows, within the area.
@@ -3030,7 +3397,8 @@ FrameworkElement BuildTile(const Model& model,
                            const Group& cat,
                            bool dark,
                            double tileAcross,
-                           TileParts* parts = nullptr) {
+                           TileParts* parts = nullptr,
+                           int groupIndex = -1) {
     const auto& L = model.layout;
     const auto& C = cat.layout;
     // This tile's icon grid; the icons keep the global size and the tile
@@ -3137,13 +3505,14 @@ FrameworkElement BuildTile(const Model& model,
         }
         SetAppTooltip(btn, nameText, app.name, L);
         // A folder opens like the group does.
-        btn.Click([app, weakTile = winrt::weak_ref<xc::Border>(tile)](
-                      wf::IInspectable const& sender, auto&&) {
+        btn.Click([app, weakTile = winrt::weak_ref<xc::Border>(tile),
+                   groupIndex, i](wf::IInspectable const& sender, auto&&) {
             if (!app.folder) {
                 LaunchApp(app);
             } else if (auto t = weakTile.get()) {
                 ShowAppsFlyout(t, RootRect(sender.try_as<FrameworkElement>()),
-                               app.name, app.children, 0);
+                               app.name, app.children, 0, groupIndex,
+                               groupIndex >= 0 ? i : -1);
             }
         });
         btn.ContextFlyout(BuildAppMenu(app));
@@ -3183,11 +3552,11 @@ FrameworkElement BuildTile(const Model& model,
             btn, winrt::box_value(winrt::hstring(
                      L"+" + std::to_wstring(count - singles) + L" more")));
         btn.Click([weakTile = winrt::weak_ref<xc::Border>(tile), name = cat.name,
-                   apps = cat.apps, singles](wf::IInspectable const& sender,
-                                             auto&&) {
+                   apps = cat.apps, singles,
+                   groupIndex](wf::IInspectable const& sender, auto&&) {
             if (auto t = weakTile.get()) {
                 ShowAppsFlyout(t, RootRect(sender.try_as<FrameworkElement>()),
-                               name, apps, (size_t)singles);
+                               name, apps, (size_t)singles, groupIndex);
             }
         });
         xc::Grid::SetRow(btn, (cells - 1) / previewColumns);
@@ -3461,10 +3830,12 @@ void ApplyColumns() {
 // --- Rearranging in Start -----------------------------------------------------
 // Groups and apps are dragged with the left mouse button, right in Start: a
 // tile by its background (or an app on its own, a 1 x 1 tile) moves the
-// group, an app moves the app, within its group or to another one. As in the
-// settings window, dragging uses pointer capture rather than XAML drag and
-// drop. The new order is saved in the mod's storage (see "Order arranged in
-// Start") and shown right away.
+// group, an app moves the app, within its group or to another one. Dropped
+// on the middle of another app, the two make a folder; on a folder, it goes
+// in. In an opened folder (or group), its apps are dragged to reorder them,
+// or out of it, onto the groups. As in the settings window, dragging uses
+// pointer capture rather than XAML drag and drop. The new order is saved in
+// the mod's storage (see "Order arranged in Start") and shown right away.
 
 // Defined with the settings window.
 wf::Rect BoundsIn(FrameworkElement const& el, UIElement const& root);
@@ -3475,14 +3846,39 @@ bool IsSingleAppTile(Group const& g) {
     return g.layout.spanHalfColumns == 1 && g.layout.spanHalfRows == 1;
 }
 
-// A drop, applied once the drag's pointer events are done.
+// The app being dragged: an app on its own (a group drag of its tile), an
+// app of a tile, or an app of one of its folders.
+AppEntry const* DraggedEntry(StartDrag const& d) {
+    if (!d.model || d.tile < 0 || d.tile >= (int)d.model->groups.size()) {
+        return nullptr;
+    }
+    auto const& cat = d.model->groups[d.tile];
+    if (d.group) {
+        return IsSingleAppTile(cat) && !cat.apps.empty() ? &cat.apps.front()
+                                                         : nullptr;
+    }
+    if (d.app < 0 || d.app >= (int)cat.apps.size()) {
+        return nullptr;
+    }
+    auto const& app = cat.apps[d.app];
+    if (d.child < 0) {
+        return &app;
+    }
+    return d.child < (int)app.children.size() ? &app.children[d.child]
+                                              : nullptr;
+}
+
+// A drop, applied once the drag's pointer events are done (see StartDrag).
 struct StartDrop {
     bool group = false;
-    int tile = -1, app = -1;
-    int targetTile = -1, targetApp = -1;
+    bool intoGroup = false;
+    int tile = -1, app = -1, child = -1;
+    int targetTile = -1, targetApp = -1, targetChild = -1;
     bool after = false;
-    bool newGroup = false;   // see StartDrag::newGroup
-    bool intoGroup = false;  // see StartDrag::intoGroup
+    bool newGroup = false;
+    bool makeFolder = false;
+    bool intoFolder = false;
+    bool fromFlyout = false;  // dropped in the opened folder or group
     std::shared_ptr<Model> model;
 };
 
@@ -3495,23 +3891,54 @@ std::shared_ptr<Model> ReorderedModel(Model const& old,
     m->allApps = old.allApps;
     m->icons = old.icons;
     m->settingsGeneration = old.settingsGeneration;
-    std::map<std::pair<int, int>, AppEntry const*> apps;
+    std::map<RawId, AppEntry const*> apps;
     for (auto const& g : old.groups) {
         for (auto const& a : g.apps) {
-            apps.emplace(std::pair{a.rawGroup, a.rawItem}, &a);
+            apps.emplace(IdOf(a), &a);
+            for (auto const& c : a.children) {
+                apps.emplace(IdOf(c), &c);
+            }
         }
     }
     for (int k = 0; k < (int)groups.size(); k++) {
         Group cat = GroupFromSetting(groups[k]);
         for (int j = 0; j < (int)groups[k].items.size(); j++) {
             auto const& item = groups[k].items[j];
-            auto it = apps.find({item.rawGroup, item.rawItem});
-            if (it == apps.end()) {
+            auto it = apps.find(IdOf(item));
+            AppEntry entry;
+            if (it != apps.end()) {
+                entry = *it->second;
+            } else if (item.type == L"folder") {
+                // Made in Start (see ApplyStartDrop).
+                entry.folder = true;
+                entry.name = item.label.empty() ? kFolderName : item.label;
+                entry.key = L"f:" + entry.name;
+            } else {
                 continue;  // not found in Start
             }
-            AppEntry entry = *it->second;
+            entry.rawGroup = item.rawGroup;
+            entry.rawItem = item.rawItem;
+            entry.rawSub = item.rawSub;
             entry.settingsGroup = k;
             entry.settingsItem = j;
+            if (item.type == L"folder") {
+                entry.folder = true;
+                entry.children.clear();
+                for (auto const& c : item.children) {
+                    auto ci = apps.find(IdOf(c));
+                    if (ci == apps.end() || ci->second->folder) {
+                        continue;
+                    }
+                    AppEntry child = *ci->second;
+                    child.rawGroup = c.rawGroup;
+                    child.rawItem = c.rawItem;
+                    child.rawSub = c.rawSub;
+                    entry.children.push_back(std::move(child));
+                }
+                if (entry.children.empty()) {
+                    continue;  // as in LoadModel
+                }
+            }
             // A folder's apps "Edit" the folder (see LoadModel).
             for (auto& child : entry.children) {
                 child.settingsGroup = k;
@@ -3525,6 +3952,8 @@ std::shared_ptr<Model> ReorderedModel(Model const& old,
     return m;
 }
 
+void RefreshStartFlyout();
+
 void ApplyStartDrop(StartDrop const& d) {
     auto model = g_model;
     if (!model || model != d.model) {
@@ -3533,7 +3962,6 @@ void ApplyStartDrop(StartDrop const& d) {
     auto const& mg = model->groups;
     auto validTile = [&](int t) { return t >= 0 && t < (int)mg.size(); };
     if (!validTile(d.tile) || !validTile(d.targetTile) ||
-        (!d.group && (d.app < 0 || d.app >= (int)mg[d.tile].apps.size())) ||
         d.targetApp >= (int)mg[d.targetTile].apps.size()) {
         return;
     }
@@ -3544,7 +3972,8 @@ void ApplyStartDrop(StartDrop const& d) {
         if (g_settings.generation != model->settingsGeneration) {
             return;  // read again since; the model follows shortly
         }
-        auto& gs = g_settings.groups;
+        // Changed on a copy, kept only if it all works out.
+        auto gs = g_settings.groups;
         auto findGroup = [&](int raw) {
             for (int k = 0; k < (int)gs.size(); k++) {
                 if (gs[k].raw == raw) {
@@ -3553,11 +3982,9 @@ void ApplyStartDrop(StartDrop const& d) {
             }
             return -1;
         };
-        auto findItem = [&](int g, AppEntry const& a) {
-            auto const& items = gs[g].items;
+        auto findIn = [](std::vector<ItemSetting> const& items, RawId id) {
             for (int i = 0; i < (int)items.size(); i++) {
-                if (items[i].rawGroup == a.rawGroup &&
-                    items[i].rawItem == a.rawItem) {
+                if (IdOf(items[i]) == id) {
                     return i;
                 }
             }
@@ -3568,28 +3995,8 @@ void ApplyStartDrop(StartDrop const& d) {
         if (sg < 0 || tg < 0) {
             return;
         }
-        // Where an app dropped on the group tg goes: before or after
-        // targetApp, or at the end. -1 if that app isn't found.
-        auto insertAt = [&] {
-            if (d.targetApp < 0) {
-                return (int)gs[tg].items.size();
-            }
-            int ti = findItem(tg, mg[d.targetTile].apps[d.targetApp]);
-            return ti < 0 ? -1 : d.after ? ti + 1 : ti;
-        };
-        if (d.group && d.intoGroup) {
-            // An app on its own into another group: its tile goes.
-            int to = insertAt();
-            if (sg == tg || to < 0 || gs[sg].items.empty()) {
-                return;
-            }
-            gs[tg].items.insert(gs[tg].items.begin() + to,
-                                std::move(gs[sg].items.front()));
-            gs[sg].items.erase(gs[sg].items.begin());
-            if (gs[sg].items.empty()) {
-                gs.erase(gs.begin() + sg);
-            }
-        } else if (d.group) {
+        if (d.group && !d.intoGroup) {
+            // A group, before or after another.
             int to = d.after ? tg + 1 : tg;
             if (to > sg) {
                 to--;
@@ -3600,46 +4007,148 @@ void ApplyStartDrop(StartDrop const& d) {
             GroupSetting moved = std::move(gs[sg]);
             gs.erase(gs.begin() + sg);
             gs.insert(gs.begin() + to, std::move(moved));
-        } else if (d.newGroup) {
-            // Out of its group: a group of its own (an app on its own), with
-            // a raw index no other group has (see MakeStartGroup).
-            int si = findItem(sg, mg[d.tile].apps[d.app]);
-            if (si < 0) {
-                return;
-            }
-            int made = 0;
-            for (auto const& g : gs) {
-                if (g.raw <= -2) {
-                    made = std::max(made, -1 - g.raw);
-                }
-            }
-            GroupSetting g = MakeStartGroup(mg[d.tile].apps[d.app].name, made,
-                                            (GroupSetting*)nullptr);
-            g.items.push_back(std::move(gs[sg].items[si]));
-            gs[sg].items.erase(gs[sg].items.begin() + si);
-            gs.insert(gs.begin() + (d.after ? tg + 1 : tg), std::move(g));
         } else {
-            int si = findItem(sg, mg[d.tile].apps[d.app]);
-            int to = insertAt();
-            if (si < 0 || to < 0) {
+            // An app (or an app on its own), found by its identity: the
+            // places it's taken from and put at shift as it moves.
+            StartDrag sd;
+            sd.model = model;
+            sd.group = d.group;
+            sd.tile = d.tile;
+            sd.app = d.app;
+            sd.child = d.child;
+            AppEntry const* src = DraggedEntry(sd);
+            if (!src) {
                 return;
             }
-            if (sg == tg) {
-                if (to > si) {
-                    to--;
+            const RawId srcId = IdOf(*src);
+            const std::wstring srcName = src->name;
+            std::optional<RawId> targetItem, targetChild;
+            if (d.targetApp >= 0) {
+                auto const& ta = mg[d.targetTile].apps[d.targetApp];
+                targetItem = IdOf(ta);
+                if (d.targetChild >= 0) {
+                    if (d.targetChild >= (int)ta.children.size()) {
+                        return;
+                    }
+                    targetChild = IdOf(ta.children[d.targetChild]);
                 }
-                if (to == si) {
+            }
+            if (targetItem == srcId || targetChild == srcId) {
+                return;  // onto itself
+            }
+            // Take it out, from its group or its folder.
+            ItemSetting moved;
+            std::optional<RawId> fromFolder;
+            bool found = false;
+            for (auto& g : gs) {
+                for (int i = 0; i < (int)g.items.size() && !found; i++) {
+                    auto& item = g.items[i];
+                    if (IdOf(item) == srcId) {
+                        moved = std::move(item);
+                        g.items.erase(g.items.begin() + i);
+                        found = true;
+                        break;
+                    }
+                    int c = findIn(item.children, srcId);
+                    if (c >= 0) {
+                        moved = std::move(item.children[c]);
+                        item.children.erase(item.children.begin() + c);
+                        fromFolder = IdOf(item);
+                        found = true;
+                    }
+                }
+                if (found) {
+                    break;
+                }
+            }
+            if (!found) {
+                return;
+            }
+            bool isFolder = moved.type == L"folder";
+            auto& dest = gs[tg].items;
+            if (d.newGroup) {
+                // A group of its own (an app on its own), with a raw index
+                // no other group has (see MakeStartGroup).
+                int made = 0;
+                for (auto const& g : gs) {
+                    if (g.raw <= -2) {
+                        made = std::max(made, -1 - g.raw);
+                    }
+                }
+                GroupSetting g =
+                    MakeStartGroup(srcName, made, (GroupSetting*)nullptr);
+                g.items.push_back(std::move(moved));
+                gs.insert(gs.begin() + (d.after ? tg + 1 : tg), std::move(g));
+            } else if (d.makeFolder) {
+                // Onto an app: a folder of the two, in its place, with a raw
+                // index no other folder has (see ApplyStartOrder).
+                int ti = targetItem ? findIn(dest, *targetItem) : -1;
+                if (ti < 0 || isFolder || dest[ti].type == L"folder") {
                     return;
                 }
+                int id = -2;
+                for (auto const& g : gs) {
+                    for (auto const& item : g.items) {
+                        if (item.rawGroup == -1) {
+                            id = std::min(id, item.rawItem - 1);
+                        }
+                    }
+                }
+                ItemSetting folder;
+                folder.type = L"folder";
+                folder.label = kFolderName;
+                folder.rawGroup = -1;
+                folder.rawItem = id;
+                folder.children.push_back(std::move(dest[ti]));
+                folder.children.push_back(std::move(moved));
+                dest[ti] = std::move(folder);
+            } else if (d.intoFolder) {
+                // Into a folder: before or after one of its apps, or last.
+                int ti = targetItem ? findIn(dest, *targetItem) : -1;
+                if (ti < 0 || isFolder || dest[ti].type != L"folder") {
+                    return;
+                }
+                auto& apps = dest[ti].children;
+                int at = (int)apps.size();
+                if (targetChild) {
+                    int ci = findIn(apps, *targetChild);
+                    if (ci < 0) {
+                        return;
+                    }
+                    at = d.after ? ci + 1 : ci;
+                }
+                apps.insert(apps.begin() + at, std::move(moved));
+            } else {
+                // Into a group: before or after one of its apps, or last.
+                int at = (int)dest.size();
+                if (targetItem) {
+                    int ti = findIn(dest, *targetItem);
+                    if (ti < 0) {
+                        return;
+                    }
+                    at = d.after ? ti + 1 : ti;
+                }
+                dest.insert(dest.begin() + at, std::move(moved));
             }
-            ItemSetting item = std::move(gs[sg].items[si]);
-            gs[sg].items.erase(gs[sg].items.begin() + si);
-            auto& dest = gs[tg].items;
-            to = std::clamp(to, 0, (int)dest.size());
-            dest.insert(dest.begin() + to, std::move(item));
+            // What it leaves empty goes: the folder it was taken from, or
+            // its app-on-its-own tile.
+            if (fromFolder) {
+                for (auto& g : gs) {
+                    std::erase_if(g.items, [&](ItemSetting const& item) {
+                        return IdOf(item) == *fromFolder &&
+                               item.children.empty();
+                    });
+                }
+            }
+            int from = findGroup(mg[d.tile].rawGroup);
+            if (from >= 0 && gs[from].items.empty() &&
+                IsSingleApp(gs[from])) {
+                gs.erase(gs.begin() + from);
+            }
         }
+        g_settings.groups = gs;
         value = StartOrderValue(g_settings);
-        groups = gs;
+        groups = std::move(gs);
     }
     // Back in the saved order: nothing to keep.
     if (value.empty()) {
@@ -3649,14 +4158,30 @@ void ApplyStartDrop(StartDrop const& d) {
     }
     g_model = ReorderedModel(*model, groups);
     RebuildHostContent();
+    if (d.fromFlyout) {
+        RefreshStartFlyout();
+    }
+}
+
+// Where the drag draws: the opened folder's layer while it's in there, else
+// the groups'.
+xc::Grid DragSurfaceRoot(StartDrag const& d) {
+    return d.inFlyout ? g_attach.flyout.root.get() : g_attach.dragRoot.get();
+}
+xc::Canvas DragSurfaceOverlay(StartDrag const& d) {
+    return d.inFlyout ? g_attach.flyout.overlay.get()
+                      : g_attach.dragOverlay.get();
 }
 
 // Ends the drag in Start: drops it (`drop`) or cancels it.
 void EndStartDrag(bool drop) {
     StartDrag d = std::move(g_attach.drag);
     g_attach.drag = StartDrag{};
-    if (auto overlay = g_attach.dragOverlay.get()) {
-        overlay.Children().Clear();
+    for (auto overlay :
+         {g_attach.dragOverlay.get(), g_attach.flyout.overlay.get()}) {
+        if (overlay) {
+            overlay.Children().Clear();
+        }
     }
     if (auto src = d.source.get()) {
         src.Opacity(1);
@@ -3664,9 +4189,21 @@ void EndStartDrag(bool drop) {
     if (!drop || !d.active || d.targetTile < 0) {
         return;
     }
-    StartDrop dropped{d.group,     d.tile,  d.app,      d.targetTile,
-                      d.targetApp, d.after, d.newGroup, d.intoGroup,
-                      d.model};
+    StartDrop dropped;
+    dropped.group = d.group;
+    dropped.intoGroup = d.intoGroup;
+    dropped.tile = d.tile;
+    dropped.app = d.app;
+    dropped.child = d.child;
+    dropped.targetTile = d.targetTile;
+    dropped.targetApp = d.targetApp;
+    dropped.targetChild = d.targetChild;
+    dropped.after = d.after;
+    dropped.newGroup = d.newGroup;
+    dropped.makeFolder = d.makeFolder;
+    dropped.intoFolder = d.intoFolder;
+    dropped.fromFlyout = d.inFlyout;
+    dropped.model = d.model;
     // After this pointer event: rebuilding the tiles removes the element
     // that has the pointer capture.
     PostToUi([dropped] { ApplyStartDrop(dropped); });
@@ -3674,8 +4211,8 @@ void EndStartDrag(bool drop) {
 
 void StartDragVisuals() {
     auto& d = g_attach.drag;
-    auto root = g_attach.dragRoot.get();
-    auto overlay = g_attach.dragOverlay.get();
+    auto root = DragSurfaceRoot(d);
+    auto overlay = DragSurfaceOverlay(d);
     if (!root || !overlay || !d.model || d.tile < 0 ||
         d.tile >= (int)d.model->groups.size()) {
         return;
@@ -3697,19 +4234,30 @@ void StartDragVisuals() {
     }
     xc::Border ghost;
     ghost.IsHitTestVisible(false);
-    if (!d.group && source && d.app >= 0 && d.app < (int)cat.apps.size()) {
-        // The app's icon, at its size in the tile, where it was grabbed.
-        auto sb = BoundsIn(source, root);
+    AppEntry const* app = d.group ? nullptr : DraggedEntry(d);
+    if (app) {
+        // The app's icon, at its size where it was grabbed (taken out of
+        // the opened folder: its size in the tiles).
+        wf::Rect sb{};
+        if (source) {
+            sb = BoundsIn(source, root);
+        } else {
+            float size = (float)((d.model->layout.iconSize +
+                                  2 * d.model->layout.appPaddingX) *
+                                 d.scale);
+            sb = {d.start.X - size / 2, d.start.Y - size / 2, size, size};
+        }
         ghost.Width(sb.Width);
         ghost.Height(sb.Height);
         ghost.CornerRadius(CornerRadiusHelper::FromUniformRadius(4));
         ghost.Background(xm::SolidColorBrush(
             dark ? winrt::Windows::UI::Color{0x30, 255, 255, 255}
                  : winrt::Windows::UI::Color{0x18, 0, 0, 0}));
-        double icon =
-            std::max(12.0, std::min((double)sb.Height,
-                                    d.model->layout.iconSize * d.scale));
-        auto img = MakeAppIcon(*d.model, cat.apps[d.app], icon);
+        double icon = std::max(
+            12.0, std::min((double)sb.Height,
+                           d.model->layout.iconSize *
+                               (d.inFlyout ? 1.0 : d.scale)));
+        auto img = MakeAppIcon(*d.model, *app, icon);
         img.HorizontalAlignment(HorizontalAlignment::Center);
         img.VerticalAlignment(VerticalAlignment::Center);
         ghost.Child(img);
@@ -3742,9 +4290,107 @@ void StartDragVisuals() {
     }
 }
 
+void UpdateStartDrag(wf::Point p);
+
+// The drag of an app out of the opened folder (or group): on over the
+// groups, where it goes on like a drag that started there. The popup closes.
+void HandStartDragToGroups(wf::Point p) {
+    auto& d = g_attach.drag;
+    auto froot = g_attach.flyout.root.get();
+    auto root = g_attach.dragRoot.get();
+    if (!froot || !root) {
+        EndStartDrag(false);
+        return;
+    }
+    wf::Point gp, start;
+    try {
+        auto t = froot.TransformToVisual(root);
+        gp = t.TransformPoint(p);
+        start = gp;
+    } catch (...) {
+        EndStartDrag(false);
+        return;
+    }
+    if (auto overlay = g_attach.flyout.overlay.get()) {
+        overlay.Children().Clear();
+    }
+    if (auto src = d.source.get()) {
+        src.Opacity(1);
+    }
+    d.source = nullptr;
+    d.ghost = nullptr;
+    d.indicator = nullptr;
+    d.inFlyout = false;
+    d.start = start;
+    // The groups are shrunk to fit Start; by how much.
+    d.scale = 1;
+    for (auto const& t : g_attach.tiles) {
+        if (auto tileEl = t.tile.get(); tileEl && tileEl.ActualWidth() > 0) {
+            d.scale = BoundsIn(tileEl, root).Width / tileEl.ActualWidth();
+            break;
+        }
+    }
+    StartDragVisuals();
+    if (d.pointer) {
+        root.CapturePointer(d.pointer);
+    }
+    if (auto f = g_attach.flyout.fly.get()) {
+        f.Hide();
+    }
+    UpdateStartDrag(gp);
+}
+
+// In the opened folder (or group): before or after one of its apps.
+void UpdateStartFlyoutDrag(wf::Point p) {
+    auto& d = g_attach.drag;
+    auto& fs = g_attach.flyout;
+    auto root = fs.root.get();
+    if (!root) {
+        return;
+    }
+    // Out of it (with a little margin): on over the groups.
+    double w = root.ActualWidth(), h = root.ActualHeight();
+    if (p.X < -8 || p.Y < -8 || p.X > w + 8 || p.Y > h + 8) {
+        HandStartDragToGroups(p);
+        return;
+    }
+    // The dragged app's place in the list shown.
+    int self = fs.folder >= 0 ? d.child : d.app;
+    for (auto const& [weakBtn, i] : fs.items) {
+        auto btn = weakBtn.get();
+        if (!btn) {
+            continue;
+        }
+        auto cb = BoundsIn(btn, root);
+        if (!RectContains(cb, p) || i == self) {
+            continue;
+        }
+        d.after = p.X > cb.X + cb.Width / 2;
+        d.targetTile = fs.tile;
+        if (fs.folder >= 0) {
+            d.intoFolder = true;
+            d.targetApp = fs.folder;
+            d.targetChild = i;
+        } else {
+            d.targetApp = i;
+        }
+        if (auto ind = d.indicator) {
+            ind.Visibility(Visibility::Visible);
+            ind.Width(3);
+            ind.Height(std::max(0.0f, cb.Height - 8));
+            xc::Canvas::SetLeft(
+                ind, d.after ? cb.X + cb.Width - 1.5f : cb.X - 1.5f);
+            xc::Canvas::SetTop(ind, cb.Y + 4);
+            ind.Background(xm::SolidColorBrush(AccentColor()));
+            ind.BorderThickness(ThicknessHelper::FromUniformLength(0));
+        }
+        return;
+    }
+}
+
 void UpdateStartDrag(wf::Point p) {
     auto& d = g_attach.drag;
-    auto root = g_attach.dragRoot.get();
+    auto root = DragSurfaceRoot(d);
     if (!root || !d.model) {
         return;
     }
@@ -3778,9 +4424,24 @@ void UpdateStartDrag(wf::Point p) {
     auto const& L = d.model->layout;
     d.targetTile = -1;
     d.targetApp = -1;
+    d.targetChild = -1;
     d.after = false;
     d.newGroup = false;
     d.intoGroup = false;
+    d.makeFolder = false;
+    d.intoFolder = false;
+
+    if (d.inFlyout) {
+        UpdateStartFlyoutDrag(p);
+        if (d.targetTile < 0 && d.inFlyout) {
+            show({}, false);
+        }
+        return;
+    }
+
+    AppEntry const* dragged = DraggedEntry(d);
+    // Folders don't go into folders.
+    bool draggingFolder = dragged && dragged->folder;
 
     // The nearest tile of the row under the pointer (on a tile, in a gap, or
     // under a tile where its name is), and its bounds; -1 if none.
@@ -3819,10 +4480,41 @@ void UpdateStartDrag(wf::Point p) {
              false);
     };
     // The app dragged (or an app on its own) dropped onto the tile `t` (at
-    // `b`, not an app on its own): before or after the app under the
-    // pointer; on the overflow cluster or elsewhere on the tile, at the end.
+    // `b`): over the middle of an app, a folder of the two (of a folder,
+    // into it); else before or after the app under the pointer, and on the
+    // overflow cluster or elsewhere on the tile, at the end. Onto an app on
+    // its own, only the former.
     auto dropOnto = [&](StartTile const& t, wf::Rect const& b) {
-        bool sameGroup = t.group == d.tile;
+        bool single = IsSingleAppTile(groups[t.group]);
+        // In its own group (not out of one of its folders).
+        bool sameGroup = t.group == d.tile && !d.group && d.child < 0;
+        wf::Rect cb{};
+        int hit = -1;
+        for (auto const& [weakBtn, i] : t.apps) {
+            auto btn = weakBtn.get();
+            if (btn && RectContains(BoundsIn(btn, root), p)) {
+                cb = BoundsIn(btn, root);
+                hit = i;
+                break;
+            }
+        }
+        bool self = sameGroup && hit == d.app;
+        if (hit >= 0 && !self && !draggingFolder &&
+            hit < (int)groups[t.group].apps.size() &&
+            p.X > cb.X + cb.Width / 4 && p.X < cb.X + cb.Width * 3 / 4) {
+            d.targetTile = t.group;
+            d.targetApp = hit;
+            if (groups[t.group].apps[hit].folder) {
+                d.intoFolder = true;
+            } else {
+                d.makeFolder = true;
+            }
+            show(cb, true);
+            return;
+        }
+        if (single) {
+            return;
+        }
         if (L.sortAppsByName) {
             // Sorted anyway: only to another group, at the end.
             if (!sameGroup) {
@@ -3831,32 +4523,19 @@ void UpdateStartDrag(wf::Point p) {
             }
             return;
         }
+        if (self) {
+            return;  // onto itself
+        }
         d.targetTile = t.group;
-        wf::Rect ind = b;
-        bool outline = true;
-        for (auto const& [weakBtn, i] : t.apps) {
-            auto btn = weakBtn.get();
-            if (!btn) {
-                continue;
-            }
-            auto cb = BoundsIn(btn, root);
-            if (!RectContains(cb, p)) {
-                continue;
-            }
+        if (hit >= 0) {
             d.after = p.X > cb.X + cb.Width / 2;
-            d.targetApp = i;
-            ind = {d.after ? cb.X + cb.Width - 1.5f : cb.X - 1.5f, cb.Y + 4, 3,
-                   std::max(0.0f, cb.Height - 8)};
-            outline = false;
-            break;
+            d.targetApp = hit;
+            show({d.after ? cb.X + cb.Width - 1.5f : cb.X - 1.5f, cb.Y + 4, 3,
+                  std::max(0.0f, cb.Height - 8)},
+                 false);
+        } else {
+            show(b, true);
         }
-        if (sameGroup && d.targetApp == d.app) {
-            d.targetTile = -1;  // onto itself
-            d.targetApp = -1;
-            d.after = false;
-            return;
-        }
-        show(ind, outline);
     };
 
     if (!d.group) {
@@ -3871,11 +4550,7 @@ void UpdateStartDrag(wf::Point p) {
                 continue;
             }
             overTile = true;
-            // Not onto an app on its own (that makes a group: the settings
-            // window does it).
-            if (!IsSingleAppTile(groups[t.group])) {
-                dropOnto(t, b);
-            }
+            dropOnto(t, b);
             break;
         }
         // Out of the tiles, among the groups (or a little below them): a
@@ -3906,21 +4581,22 @@ void UpdateStartDrag(wf::Point p) {
             }
         }
     } else {
-        // An app on its own over a group's tile: into that group (as in the
-        // settings window). Near the tile's sides, it's moved before or
-        // after the tile, like a group.
+        // An app on its own over another tile: into that group, or onto its
+        // apps (as in the settings window). Near a group's sides, it's moved
+        // before or after the tile, like a group.
         auto const& cat = groups[d.tile];
         if (IsSingleAppTile(cat) && !cat.apps.empty()) {
             for (auto const& t : g_attach.tiles) {
                 auto tileEl = t.tile.get();
                 if (!tileEl || t.group < 0 || t.group >= (int)groups.size() ||
-                    t.group == d.tile || IsSingleAppTile(groups[t.group])) {
+                    t.group == d.tile) {
                     continue;
                 }
                 auto b = BoundsIn(tileEl, root);
                 float edge = std::min(b.Width * 0.15f, 24.0f);
-                if (RectContains(b, p) && p.X > b.X + edge &&
-                    p.X < b.X + b.Width - edge) {
+                if (RectContains(b, p) &&
+                    (IsSingleAppTile(groups[t.group]) ||
+                     (p.X > b.X + edge && p.X < b.X + b.Width - edge))) {
                     dropOnto(t, b);
                     d.intoGroup = d.targetTile >= 0;
                     break;
@@ -4023,7 +4699,7 @@ void HookStartDrag(xc::Grid const& root) {
                Input::PointerRoutedEventArgs const& e) {
                 auto& d = g_attach.drag;
                 auto root = g_attach.dragRoot.get();
-                if (!d.pressed || !root) {
+                if (!d.pressed || d.inFlyout || !root) {
                     return;
                 }
                 auto p = e.GetCurrentPoint(root).Position();
@@ -4051,7 +4727,8 @@ void HookStartDrag(xc::Grid const& root) {
             [](wf::IInspectable const&,
                Input::PointerRoutedEventArgs const& e) {
                 auto root = g_attach.dragRoot.get();
-                if (!g_attach.drag.pressed || !root) {
+                if (!g_attach.drag.pressed || g_attach.drag.inFlyout ||
+                    !root) {
                     return;
                 }
                 if (!g_attach.drag.active) {
@@ -4074,7 +4751,119 @@ void HookStartDrag(xc::Grid const& root) {
             [](wf::IInspectable const&,
                Input::PointerRoutedEventArgs const& e) {
                 auto root = g_attach.dragRoot.get();
-                if (g_attach.drag.pressed && root &&
+                if (g_attach.drag.pressed && !g_attach.drag.inFlyout &&
+                    root && e.OriginalSource() == root) {
+                    EndStartDrag(false);
+                }
+            })),
+        true);
+}
+
+// The pointer events of a drag in the opened folder (or group), on its
+// content (`root`, see BuildGroupFlyout).
+void HookStartFlyoutDrag(xc::Grid const& root) {
+    winrt::weak_ref<xc::Grid> weakRoot = root;
+    root.AddHandler(
+        UIElement::PointerPressedEvent(),
+        winrt::box_value(Input::PointerEventHandler(
+            [weakRoot](wf::IInspectable const&,
+                       Input::PointerRoutedEventArgs const& e) {
+                auto root = weakRoot.get();
+                auto& fs = g_attach.flyout;
+                auto model = g_model;
+                if (!root || root != fs.root.get() || !model ||
+                    model != fs.model || g_attach.drag.pressed ||
+                    fs.tile < 0 || fs.tile >= (int)model->groups.size() ||
+                    e.Pointer().PointerDeviceType() !=
+                        winrt::Windows::Devices::Input::PointerDeviceType::
+                            Mouse) {
+                    return;
+                }
+                auto pt = e.GetCurrentPoint(root);
+                if (!pt.Properties().IsLeftButtonPressed()) {
+                    return;
+                }
+                auto p = pt.Position();
+                for (auto const& [weakBtn, i] : fs.items) {
+                    auto btn = weakBtn.get();
+                    if (!btn || !RectContains(BoundsIn(btn, root), p)) {
+                        continue;
+                    }
+                    StartDrag d;
+                    d.pressed = true;
+                    d.inFlyout = true;
+                    d.tile = fs.tile;
+                    d.app = fs.folder >= 0 ? fs.folder : i;
+                    d.child = fs.folder >= 0 ? i : -1;
+                    d.model = model;
+                    d.start = p;
+                    d.pointer = e.Pointer();
+                    d.source = winrt::make_weak(btn.as<UIElement>());
+                    g_attach.drag = std::move(d);
+                    return;
+                }
+            })),
+        true);
+    root.AddHandler(
+        UIElement::PointerMovedEvent(),
+        winrt::box_value(Input::PointerEventHandler(
+            [weakRoot](wf::IInspectable const&,
+                       Input::PointerRoutedEventArgs const& e) {
+                auto& d = g_attach.drag;
+                auto root = weakRoot.get();
+                if (!d.pressed || !d.inFlyout || !root) {
+                    return;
+                }
+                auto p = e.GetCurrentPoint(root).Position();
+                if (!d.active) {
+                    float dx = p.X - d.start.X, dy = p.Y - d.start.Y;
+                    if (dx * dx + dy * dy < 36) {
+                        return;
+                    }
+                    if (d.model != g_model) {
+                        EndStartDrag(false);
+                        return;
+                    }
+                    d.active = true;
+                    // Taken from the button (it then doesn't click).
+                    root.CapturePointer(d.pointer);
+                    StartDragVisuals();
+                }
+                e.Handled(true);
+                UpdateStartDrag(p);
+            })),
+        true);
+    root.AddHandler(
+        UIElement::PointerReleasedEvent(),
+        winrt::box_value(Input::PointerEventHandler(
+            [weakRoot](wf::IInspectable const&,
+                       Input::PointerRoutedEventArgs const& e) {
+                auto root = weakRoot.get();
+                if (!g_attach.drag.pressed || !g_attach.drag.inFlyout ||
+                    !root) {
+                    return;
+                }
+                if (!g_attach.drag.active) {
+                    // A click: the button already did what it does.
+                    g_attach.drag = StartDrag{};
+                    root.ReleasePointerCapture(e.Pointer());
+                    return;
+                }
+                e.Handled(true);
+                UpdateStartDrag(e.GetCurrentPoint(root).Position());
+                if (g_attach.drag.inFlyout) {
+                    EndStartDrag(true);
+                    root.ReleasePointerCapture(e.Pointer());
+                }
+            })),
+        true);
+    root.AddHandler(
+        UIElement::PointerCaptureLostEvent(),
+        winrt::box_value(Input::PointerEventHandler(
+            [weakRoot](wf::IInspectable const&,
+                       Input::PointerRoutedEventArgs const& e) {
+                auto root = weakRoot.get();
+                if (g_attach.drag.pressed && g_attach.drag.inFlyout && root &&
                     e.OriginalSource() == root) {
                     EndStartDrag(false);
                 }
@@ -4145,7 +4934,7 @@ void RebuildHostContent() {
             cat.layout.spanHalfColumns = row.halves;
         }
         TileParts parts;
-        auto tile = BuildTile(*g_model, cat, dark, row.tile, &parts);
+        auto tile = BuildTile(*g_model, cat, dark, row.tile, &parts, gi);
         StartTile st;
         st.group = gi;
         st.outer = tile;
@@ -5328,12 +6117,19 @@ void LoadSettings() {
     for (int g = 0; g < (int)s.groups.size(); g++) {
         s.groups[g].raw = g;
         for (int i = 0; i < (int)s.groups[g].items.size(); i++) {
-            s.groups[g].items[i].rawGroup = g;
-            s.groups[g].items[i].rawItem = i;
+            auto& item = s.groups[g].items[i];
+            item.rawGroup = g;
+            item.rawItem = i;
+            for (int c = 0; c < (int)item.children.size(); c++) {
+                item.children[c].rawGroup = g;
+                item.children[c].rawItem = i;
+                item.children[c].rawSub = c;
+            }
         }
     }
     s.rawGroupKeys = OrderGroupKeys(s.groups);
     s.rawItemKeys = OrderItemKeys(s.groups);
+    s.rawChildKeys = OrderChildKeys(s.groups);
     s.groups =
         ApplyStartOrder(s.groups, PlanStartOrder(s.groups, ReadStartOrderValue()));
 
@@ -6431,7 +7227,7 @@ class SettingsWindow {
         double startH = 0;
         std::wstring originalSize;  // Resize: to restore when canceled
         std::wstring newSize;       // Resize result
-        std::function<void()> doubleClick;  // run when the press ends
+        std::function<void()> click;  // run when released without a drag
         Input::Pointer pointer{nullptr};    // captured when the drag starts
         wf::Point grab{};  // pointer position within the ghost
         int targetCat = -1;
@@ -6441,6 +7237,9 @@ class SettingsWindow {
         // Group drag of a single app (see BuildBoardTile): dropped on the
         // middle of another tile, its app goes into that group.
         bool intoGroup = false;
+        // Dropped on the middle of an app (item targetIndex of targetCat):
+        // the two make a folder in its place.
+        bool makeFolder = false;
     };
     FrameworkElement BuildBoardPage();
     void RebuildBoard();
@@ -6465,7 +7264,7 @@ class SettingsWindow {
                        int cat,
                        int item,
                        std::wstring app = L"",
-                       std::function<void()> onDoubleClick = nullptr,
+                       std::function<void()> onClick = nullptr,
                        int sub = -1);
     void HookSurface(std::shared_ptr<BoardSurface> const& surf);
     void BeginInlineEdit(FrameworkElement const& anchor,
@@ -6491,6 +7290,9 @@ class SettingsWindow {
                               AppGhostLook const& look);
     void EndDrag(bool drop);
     void ApplyDrop(DragState const& d);
+    // Puts the app at item `ii` of group `ci` and `item` in a new folder,
+    // in the app's place, and selects the folder.
+    void MakeFolderAt(int ci, int ii, EditItem item);
     void ShowRenameFlyout(int ci, FrameworkElement const& anchor);
     xc::MenuFlyout TileMenu(int ci, FrameworkElement const& tile);
     xc::MenuFlyout AppMenu(int ci, int ii);
@@ -6634,8 +7436,6 @@ class SettingsWindow {
     int m_iconGeneration = 0;
     std::vector<std::function<void()>> m_later;  // see Later()
     xc::Border m_boardHeadingHost{nullptr};
-    winrt::weak_ref<FrameworkElement> m_lastClickEl;
-    ULONGLONG m_lastClickTime = 0;
     int m_boardSelCat = -1;  // group with the accent border
     int m_labelClickCat = -1;  // last clicked group name (double click)
     // Details panel (board page).
@@ -7820,7 +8620,7 @@ void SettingsWindow::BuildItemEditor() {
         });
         card(L"\uE8B7", L"Apps",
              (count + L" Drop apps on the folder to add them, or open it "
-                      L"(or double-click it) to add, reorder and edit them.")
+                      L"(or click it) to reorder and edit them.")
                  .c_str(),
              open, nullptr);
         auto icon = textBox(item->icon, L"Empty = its apps' icons",
@@ -8496,6 +9296,24 @@ void SettingsWindow::LayoutAppsPanel() {
     }
 }
 
+// A tooltip with `text` on `el` only while `name` is cut short, as in Start
+// (see SetAppTooltip); without a name shown, always.
+void TooltipWhenTrimmed(FrameworkElement const& el,
+                        xc::TextBlock const& name,
+                        std::wstring const& text) {
+    if (!name) {
+        xc::ToolTipService::SetToolTip(el, winrt::box_value(text));
+        return;
+    }
+    winrt::weak_ref<FrameworkElement> weakEl = el;
+    name.IsTextTrimmedChanged([weakEl, text](xc::TextBlock const& tb, auto&&) {
+        if (auto e = weakEl.get()) {
+            xc::ToolTipService::SetToolTip(
+                e, tb.IsTextTrimmed() ? winrt::box_value(text) : nullptr);
+        }
+    });
+}
+
 FrameworkElement SettingsWindow::BuildBoardApp(EditItem const& item,
                                                double iconSize,
                                                bool showName,
@@ -8606,11 +9424,18 @@ FrameworkElement SettingsWindow::BuildBoardTile(
                                : Brush(0, 0, 0, 0));
         cellEl.BorderThickness(ThicknessHelper::FromUniformLength(1));
         bool folder = item.type == L"folder";
-        xc::ToolTipService::SetToolTip(
-            cellEl, Box(folder ? ItemTitle(item) +
-                                     L"\nDouble-click to open it, or drop "
-                                     L"apps on it to add them"
-                               : ItemTitle(item)));
+        {
+            // The name under the icon, if it's shown (BuildBoardApp).
+            xc::TextBlock nameText{nullptr};
+            if (auto sp = cellEl.Child().try_as<xc::StackPanel>()) {
+                for (auto c : sp.Children()) {
+                    if (auto tb = c.try_as<xc::TextBlock>()) {
+                        nameText = tb;
+                    }
+                }
+            }
+            TooltipWhenTrimmed(cellEl, nameText, ItemTitle(item));
+        }
         cellEl.ContextFlyout(AppMenu(ci, i));
         AddHover(cellEl, m_dark);
         // A single app without a background fills its whole tile, which
@@ -8847,36 +9672,12 @@ void SettingsWindow::ShowOverflowFlyout(int ci,
     content.Children().Append(
         Text(folder >= 0
                  ? L"Drag the apps to reorder them, or out of the folder to "
-                   L"move them. Click one to edit it below, right-click for "
-                   L"more."
+                   L"move them, and drop apps on the folder to add them. "
+                   L"Click one to edit it below, right-click for more."
                  : L"The apps that don't fit in the tile. Drag them to "
                    L"reorder them. Click one to edit it below, right-click "
                    L"for more.",
              12, true));
-    if (folder >= 0) {
-        // Add app, into the folder.
-        xc::MenuFlyout menu;
-        ThemeMenu(menu, m_dark);
-        auto add = [&](PCWSTR glyph, PCWSTR text, std::wstring type) {
-            xc::MenuFlyoutItem mi;
-            mi.Text(text);
-            xc::FontIcon icon;
-            icon.Glyph(glyph);
-            mi.Icon(icon);
-            mi.Click([this, type, ci, folder](auto&&, auto&&) {
-                Later([this, type, ci, folder] { AddItem(type, ci, folder); });
-            });
-            menu.Items().Append(mi);
-        };
-        add(L"\uF0E2", L"Start app", L"app");
-        add(L"\uE756", L"Program", L"program");
-        add(L"\uE774", L"Website", L"website");
-        menu.Placement(xcp::FlyoutPlacementMode::BottomEdgeAlignedLeft);
-        auto addApp = TextButton(L"\uE710", L"Add app", nullptr);
-        addApp.Flyout(menu);
-        addApp.HorizontalAlignment(HorizontalAlignment::Left);
-        content.Children().Append(addApp);
-    }
     m_flyoutHost = xc::Border();
     content.Children().Append(m_flyoutHost);
     root.Children().Append(content);
@@ -9022,7 +9823,7 @@ void SettingsWindow::RebuildFlyout() {
         name.Width(look.textWidth);
         sp.Children().Append(name);
         cellEl.Child(sp);
-        xc::ToolTipService::SetToolTip(cellEl, Box(ItemTitle(item)));
+        TooltipWhenTrimmed(cellEl, name, ItemTitle(item));
         // Selected like on the board: a 1 px border, transparent otherwise.
         cellEl.BorderThickness(ThicknessHelper::FromUniformLength(1));
         bool selected = ci == m_selCat &&
@@ -9215,12 +10016,12 @@ void SettingsWindow::MakeDraggable(FrameworkElement const& el,
                                    int cat,
                                    int item,
                                    std::wstring app,
-                                   std::function<void()> onDoubleClick,
+                                   std::function<void()> onClick,
                                    int sub) {
     winrt::weak_ref<FrameworkElement> weak = el;
     std::weak_ptr<BoardSurface> weakSurf = surf;
     el.PointerPressed([this, weak, weakSurf, kind, cat, item, app,
-                       onDoubleClick, sub](auto&&,
+                       onClick, sub](auto&&,
                                       Input::PointerRoutedEventArgs const& e) {
         auto el = weak.get();
         auto surf = weakSurf.lock();
@@ -9238,22 +10039,9 @@ void SettingsWindow::MakeDraggable(FrameworkElement const& el,
                        (kind == DragKind::Group && item >= 0);
             SelectBoardItem(cat, app ? item : -1, app ? sub : -1);
         }
-        std::function<void()> doubleClick;
-        if (onDoubleClick) {
-            ULONGLONG now = GetTickCount64();
-            if (m_lastClickEl.get() == el &&
-                now - m_lastClickTime <= GetDoubleClickTime()) {
-                m_lastClickEl = nullptr;
-                doubleClick = onDoubleClick;
-            } else {
-                m_lastClickEl = el;
-                m_lastClickTime = now;
-            }
-        }
         m_drag = DragState{};
-        // A double click acts when the button is released: a text box shown
-        // while it's still down would lose the focus to the release.
-        m_drag.doubleClick = doubleClick;
+        // A click (a press released without dragging) opens a folder.
+        m_drag.click = onClick;
         m_drag.pressed = true;
         m_drag.kind = kind;
         m_drag.cat = cat;
@@ -9298,22 +10086,25 @@ void SettingsWindow::HookSurface(std::shared_ptr<BoardSurface> const& surf) {
             }
             e.Handled(true);
             auto root = m_drag.surface->root;
-            auto doubleClick = m_drag.doubleClick;
-            if (doubleClick) {
-                EndDrag(false);
-                root.ReleasePointerCapture(e.Pointer());
-                Later(doubleClick);
-                return;
-            }
             UpdateDrag(e.GetCurrentPoint(root).Position());
+            // A click on a folder opens it.
+            auto click = m_drag.active ? nullptr : m_drag.click;
             // A click (no drag) on an app on the board: show its settings.
             bool appClick = !m_drag.active && m_drag.surface == m_board &&
                             (m_drag.kind == DragKind::App ||
                              (m_drag.kind == DragKind::Group &&
                               m_drag.item >= 0));
+            // Not for a folder: a click opens it, over the board, which then
+            // stays where it is.
+            if (EditItem const* item = DraggedItem(m_drag);
+                item && item->type == L"folder") {
+                appClick = false;
+            }
             EndDrag(m_drag.active);
             root.ReleasePointerCapture(e.Pointer());
-            if (appClick) {
+            if (click) {
+                Later(click);
+            } else if (appClick) {
                 Later([this] { ScrollToAppSettings(); });
             }
         })),
@@ -9470,11 +10261,20 @@ void SettingsWindow::StartDragVisuals() {
             b.BorderThickness(ThicknessHelper::FromUniformLength(1));
             b.CornerRadius(CornerRadiusHelper::FromUniformRadius(6));
             b.Padding(ThicknessHelper::FromLengths(10, 5, 10, 5));
-            d.ghostText = Text(d.kind == DragKind::Group &&
-                                       d.cat >= 0 && d.cat < (int)cats.size()
-                                   ? cats[d.cat].name
-                                   : L"",
-                               12);
+            // A group's name; an app on its own (dragged by its app), the
+            // app's, as its group's name isn't shown (and may be empty).
+            std::wstring title;
+            if (d.kind == DragKind::Group && d.cat >= 0 &&
+                d.cat < (int)cats.size()) {
+                auto const& cat = cats[d.cat];
+                title = cat.name;
+                if (d.item >= 0 && d.item < (int)cat.items.size() &&
+                    (IsSingleApp(cat) || cat.items.size() == 1 ||
+                     title.empty())) {
+                    title = ItemTitle(cat.items[d.item]);
+                }
+            }
+            d.ghostText = Text(title, 12);
             d.ghostText.TextWrapping(TextWrapping::NoWrap);
             b.Child(d.ghostText);
             ghost = b;
@@ -9551,9 +10351,6 @@ void SettingsWindow::UpdateDrag(wf::Point p) {
             return;
         }
     }
-    if (d.doubleClick) {
-        return;  // the second click of a double click doesn't drag
-    }
     if (!d.active) {
         float dx = p.X - d.start.X, dy = p.Y - d.start.Y;
         if (dx * dx + dy * dy < 36) {
@@ -9597,6 +10394,12 @@ void SettingsWindow::UpdateDrag(wf::Point p) {
     d.targetCat = -1;
     d.targetIndex = -1;
     d.targetFolder = -1;
+    d.makeFolder = false;
+    // Over the middle half of a cell (an app or a folder): into it, rather
+    // than before or after it.
+    auto overMiddle = [&](wf::Rect const& cb) {
+        return p.X > cb.X + cb.Width / 4 && p.X < cb.X + cb.Width * 3 / 4;
+    };
     // The apps of a folder of group `c` (an item index), if it is one.
     auto folderApps = [&](int c, int f) -> std::vector<EditItem> const* {
         if (c < 0 || c >= (int)s.groups.size() || f < 0 ||
@@ -9647,14 +10450,21 @@ void SettingsWindow::UpdateDrag(wf::Point p) {
                     bool self = d.kind == DragKind::App && d.sub < 0 &&
                                 d.cat == c.cat && d.item == c.index;
                     if (c.folder && !c.cluster && !draggingFolder && !self &&
-                        p.X > cb.X + cb.Width / 4 &&
-                        p.X < cb.X + cb.Width * 3 / 4) {
+                        overMiddle(cb)) {
                         if (auto const* apps = folderApps(c.cat, c.index)) {
                             d.targetFolder = c.index;
                             d.targetIndex = (int)apps->size();
                             ind = cb;
                             break;
                         }
+                    }
+                    // Over the middle of an app: the two make a folder.
+                    if (!c.folder && !c.cluster && c.sub < 0 && !inFolder &&
+                        !draggingFolder && !self && overMiddle(cb)) {
+                        d.makeFolder = true;
+                        d.targetIndex = c.index;
+                        ind = cb;
+                        break;
                     }
                     bool after = !c.cluster && p.X > cb.X + cb.Width / 2;
                     d.targetIndex =
@@ -9684,7 +10494,35 @@ void SettingsWindow::UpdateDrag(wf::Point p) {
             bool singleApp = d.item >= 0 && d.cat >= 0 &&
                              d.cat < (int)s.groups.size() &&
                              s.groups[d.cat].items.size() == 1;
+            // A single app (not a folder) over the middle of another
+            // group's app: the two make a folder; of a folder: into it.
+            if (singleApp && s.groups[d.cat].items[0].type != L"folder") {
+                for (auto const& c : surf->cells) {
+                    if (c.cat == d.cat || c.cluster || c.sub >= 0 ||
+                        c.cat < 0 || c.cat >= (int)s.groups.size()) {
+                        continue;
+                    }
+                    auto cb = BoundsIn(c.el, surf->root);
+                    if (!RectContains(cb, p) || !overMiddle(cb)) {
+                        continue;
+                    }
+                    d.targetCat = c.cat;
+                    d.intoGroup = true;
+                    if (auto const* apps = folderApps(c.cat, c.index)) {
+                        d.targetFolder = c.index;
+                        d.targetIndex = (int)apps->size();
+                    } else {
+                        d.makeFolder = true;
+                        d.targetIndex = c.index;
+                    }
+                    show(cb, true);
+                    break;
+                }
+            }
             for (auto const& t : surf->tiles) {
+                if (d.targetCat >= 0) {
+                    break;  // onto an app (above)
+                }
                 auto b = BoundsIn(t.el, surf->root);
                 if (!RectContains(b, p)) {
                     continue;
@@ -9828,6 +10666,20 @@ void SettingsWindow::EndDrag(bool drop) {
     Later([this, d] { ApplyDrop(d); });
 }
 
+void SettingsWindow::MakeFolderAt(int ci, int ii, EditItem item) {
+    auto& items = m_model.groups[ci].items;
+    EditItem folder;
+    folder.type = L"folder";
+    folder.label = kFolderName;
+    folder.children.push_back(std::move(items[ii]));
+    folder.children.push_back(std::move(item));
+    items[ii] = std::move(folder);
+    m_selCat = ci;
+    m_selItem = ii;
+    m_selSub = -1;
+    SelectBoardGroup(m_selCat);
+}
+
 void SettingsWindow::ApplyDrop(DragState const& d) {
     auto& cats = m_model.groups;
     auto validCat = [&](int c) { return c >= 0 && c < (int)cats.size(); };
@@ -9884,6 +10736,34 @@ void SettingsWindow::ApplyDrop(DragState const& d) {
                 break;
             }
             if (!validCat(d.targetCat)) {
+                break;
+            }
+            if (d.makeFolder) {
+                // Onto an app: the two make a folder in its place.
+                int ti = d.targetIndex;
+                if (ti < 0 || ti >= (int)cats[d.targetCat].items.size() ||
+                    cats[d.targetCat].items[ti].type == L"folder") {
+                    break;
+                }
+                EditItem item;
+                if (d.kind == DragKind::App) {
+                    EditItem const* src = DraggedItem(d);
+                    if (!src || src->type == L"folder" ||
+                        (d.sub < 0 && d.cat == d.targetCat && d.item == ti)) {
+                        break;
+                    }
+                    item = *src;
+                    // Indices after the app taken out move up by one.
+                    if (d.sub < 0 && d.cat == d.targetCat && d.item < ti) {
+                        ti--;
+                    }
+                    eraseSource();
+                } else {
+                    item.type = L"app";
+                    item.app = d.app;
+                }
+                MakeFolderAt(d.targetCat, ti, std::move(item));
+                changed = true;
                 break;
             }
             int tf = d.targetFolder;  // into this folder, or -1
@@ -9945,13 +10825,40 @@ void SettingsWindow::ApplyDrop(DragState const& d) {
                     break;
                 }
                 EditItem item = cats[from].items.front();
+                int target = d.targetCat;
+                auto& targetItems = cats[target].items;
+                int tf = d.targetFolder;
+                if (d.makeFolder || tf >= 0) {
+                    // Onto an app (a folder of the two) or into a folder.
+                    int ti = d.makeFolder ? d.targetIndex : tf;
+                    if (item.type == L"folder" || ti < 0 ||
+                        ti >= (int)targetItems.size() ||
+                        (targetItems[ti].type == L"folder") != (tf >= 0)) {
+                        break;
+                    }
+                    cats.erase(cats.begin() + from);
+                    if (from < target) {
+                        target--;
+                    }
+                    if (d.makeFolder) {
+                        MakeFolderAt(target, ti, std::move(item));
+                    } else {
+                        auto& apps = cats[target].items[ti].children;
+                        apps.push_back(std::move(item));
+                        m_selCat = target;
+                        m_selItem = ti;
+                        m_selSub = (int)apps.size() - 1;
+                        SelectBoardGroup(m_selCat);
+                    }
+                    changed = true;
+                    break;
+                }
                 // Onto an app without a group: the two make a group.
                 if (IsSingleApp(cats[d.targetCat])) {
                     MakeGroupOf(cats[d.targetCat], NewGroupName(cats));
                 }
                 auto& dest = cats[d.targetCat].items;
                 dest.push_back(std::move(item));
-                int target = d.targetCat;
                 int index = (int)dest.size() - 1;
                 cats.erase(cats.begin() + from);
                 if (from < target) {
@@ -11584,7 +12491,8 @@ void SettingsWindow::RequestClose() {
 // its settings scrolled to. Indices are those of the saved settings; ones
 // that don't fit what's being edited just show the page.
 void SettingsWindow::ShowItem(int group, int item) {
-    if (group < 0 || group >= (int)m_model.groups.size() || item < 0 ||
+    // item -1: the group itself.
+    if (group < 0 || group >= (int)m_model.groups.size() || item < -1 ||
         item >= (int)m_model.groups[group].items.size()) {
         return;
     }

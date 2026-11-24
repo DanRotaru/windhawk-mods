@@ -43,7 +43,7 @@ Changes apply to Start as soon as you click **Save settings**.
 
 Right‑click the groups in Start → **Customize Start Groups** (also added to Start's own right‑click menu, after *Start settings*) opens a settings window with the same settings, but easier to edit:
 
-* **Groups** — shows the groups the way Start does. Drag apps to reorder them or move them to another group, drag a tile to reorder the groups, drag a tile's corner to resize it, and drag apps from the All Apps list onto a tile to add them. **Add app → Folder** adds a folder: drop apps onto it to put them in, and double‑click it to open it, then add, reorder or drag apps back out. The selected group and app are edited below the groups. Right‑click a tile to rename, duplicate or delete it.
+* **Groups** — shows the groups the way Start does. Drag apps to reorder them or move them to another group, drag a tile to reorder the groups, drag a tile's corner to resize it, and drag apps from the All Apps list onto a tile to add them. **Add app → Folder** adds a folder, and dropping an app onto the middle of another app puts both in a new folder: drop apps onto it to put them in, and click it to open it, then reorder or drag apps back out. The selected group and app are edited below the groups. Right‑click a tile to rename, duplicate or delete it.
 * **Customization** — the size preset (Default, Small, Large), gaps, corner radius, colors and group names.
 * **Behavior** — placement, section title, app names, tooltips, sorting and columns.
 * **Built‑in sections** — hide Start's own Pinned, Recommended and All sections.
