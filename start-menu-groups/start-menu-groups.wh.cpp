@@ -372,7 +372,7 @@ Empty groups are hidden. None of Start's own sections are hidden by default. Eve
 - tiles:
   - size: 154
     $name: Tile size
-    $description: Width and height of a group tile. Start's own tiles are 154.
+    $description: Width and height of a group tile. Start's own tiles are 154. Tiles are made a little wider or narrower so the rows fill Start's width.
   - gapX: 30
     $name: Horizontal gap between tiles
   - gapY: 20
@@ -607,24 +607,54 @@ double TileWidth(int halves, double tileSize, double gap) {
     return halves * (tileSize + gap) / 2 - gap;
 }
 
-// Half cells that fit a row `width` wide. A row may be up to 5% wider than
-// the space: the Viewbox around the grid then shrinks it a little, so e.g. a
-// narrow 1 × 2 tile still goes next to the others instead of on a new row
-// when it's just short of fitting.
-constexpr double kRowOverflow = 1.05;
+// A row holds as many tiles as fit, and at least as many as roughly fill a
+// default-width Start menu, which holds 3 default tiles (154 wide, 30
+// apart): 3 default, 4 small or 2 large tiles.
+constexpr double kReferenceRowWidth = 3 * 154 + 2 * 30;
 
-int FitHalves(double width, double half, double gap) {
-    return width > 0 ? (int)std::floor((width * kRowOverflow + gap) / half)
-                     : 0;
+// Half cells per row of a default-width Start menu: whole tiles, rounded
+// down, so big tiles (the Large preset) don't make the row wider than Start.
+int MinRowHalves(double tileSize, double gap) {
+    int n = (int)std::floor((kReferenceRowWidth + gap) / (tileSize + gap) +
+                            0.05);
+    return 2 * std::max(n, 1);
+}
+
+// How much wider or narrower than set a tile may be made so that its row
+// fills Start's width. Past that (a Start narrower than the fewest tiles a
+// row holds), the Viewbox around the row shrinks it to fit.
+constexpr double kMinTileFit = 0.85, kMaxTileFit = 1.15;
+
+// A row of the group grid fitted to a `width` wide space: the number of
+// half cells closest to what fits, and the tiles made a little wider or
+// narrower so the row ends exactly at the space's right edge, like Start's
+// own grids. The gaps stay as set, and so do the tiles' heights.
+struct RowFit {
+    int halves;   // half cells per row
+    double tile;  // a tile's size across (one cell, without its gap)
+    double half;  // a half cell: (tile + gap) / 2
+};
+
+RowFit FitRow(double width, double tileSize, double gap) {
+    int halves = MinRowHalves(tileSize, gap);
+    double tile = tileSize;
+    if (width > 0) {
+        double nominal = (tileSize + gap) / 2;
+        halves =
+            std::max(halves, (int)std::lround((width + gap) / nominal));
+        tile = std::clamp(2 * (width + gap) / halves - gap,
+                          tileSize * kMinTileFit, tileSize * kMaxTileFit);
+    }
+    return {halves, tile, (tile + gap) / 2};
 }
 
 // Width of the frame holding a row of `halves` half cells: the tiles and
-// the gaps between them, plus 1 px so layout rounding can't make the grid a
-// hair narrower than `halves` cells and drop the last one. (More slack would
-// only make the Viewbox shrink the row.)
+// the gaps between them. (The grid inside gets 1 px of slack, see
+// kRowSlack, so layout rounding can't drop the last cell of a row.)
 double RowFrameWidth(int halves, double half, double gap) {
-    return halves * half - gap + 1;
+    return halves * half - gap;
 }
+constexpr double kRowSlack = 1;
 
 struct GroupSetting {
     std::wstring name;
@@ -1004,29 +1034,27 @@ double TileHeight(int halfRows, double tileSize, double gap, double labelH) {
     return halfRows * (tileSize + gap + labelH) / 2 - gap - labelH;
 }
 
-// A tile whose name isn't shown also takes the space the name would have
-// (it's taller); a one spot wide one also half the gap on its right, so
-// that a single app is about square, like an app in Start's Pinned. (Not
-// on its left: it would stick out past the start of its row.)
-// `outsetX` is how far it reaches into the gap on the left (none).
+// A tile's size: across, in cells of the row it's in (`tileAcross`, the
+// tile size fitted to the row, see FitRow); down, in rows of the set tile
+// size. A tile whose name isn't shown also takes the space the name would
+// have (it's taller). Every tile stays within its cells, so the gaps between
+// tiles are the same everywhere and a row never gets wider than its cells.
 struct TileBox {
-    double width, height, outsetX;
+    double width, height;
 };
 
 TileBox TileBoxFor(int halves,
                    int halfRows,
+                   double tileAcross,
                    double tileSize,
                    double gapX,
                    double gapY,
                    double labelH,
                    bool nameShown) {
-    TileBox b{TileWidth(halves, tileSize, gapX),
-              TileHeight(halfRows, tileSize, gapY, labelH), 0};
+    TileBox b{TileWidth(halves, tileAcross, gapX),
+              TileHeight(halfRows, tileSize, gapY, labelH)};
     if (!nameShown) {
         b.height += labelH;
-        if (halves == 1) {
-            b.width += gapX / 2;
-        }
     }
     return b;
 }
@@ -1173,13 +1201,13 @@ struct Attachment {
     // attachment must then be checked again.
     std::vector<std::pair<winrt::weak_ref<FrameworkElement>, winrt::event_token>>
         unloadedTokens;
-    // The group grid, and the half cells per row it's currently set to.
+    // The group grid and its frame.
     winrt::weak_ref<xc::VariableSizedWrapGrid> wrap;
     winrt::weak_ref<xc::Border> wrapFrame;
-    int columns = 0;
-    // The half cells per row the tiles were built for: a tile wider than
-    // that is built narrower (see RebuildHostContent). 0: not known yet.
-    int builtHalves = 0;
+    // The host width the tiles were built for (whole DIPs, see HostRowWidth;
+    // 0: before the host was laid out): the row is fitted to it (FitRow),
+    // and built again when it changes.
+    double builtWidth = -1;
     // The "Where to show the groups" setting it was attached for (before a
     // fallback), to move the groups when it changes.
     std::wstring placement;
@@ -2929,6 +2957,7 @@ struct TileParts {
 FrameworkElement BuildTile(const Model& model,
                            const Group& cat,
                            bool dark,
+                           double tileAcross,
                            TileParts* parts = nullptr) {
     const auto& L = model.layout;
     const auto& C = cat.layout;
@@ -2943,9 +2972,9 @@ FrameworkElement BuildTile(const Model& model,
     const double labelH =
         L.showLabels ? L.labelSpacing + L.labelFontSize * 1.4 : 0;
     const bool nameShown = L.showLabels && cat.showLabel;
-    const TileBox box = TileBoxFor(spanHalves, spanHalfRows, L.tileSize,
-                                   L.tileSpacingX, L.tileSpacingY, labelH,
-                                   nameShown);
+    const TileBox box =
+        TileBoxFor(spanHalves, spanHalfRows, tileAcross, L.tileSize,
+                   L.tileSpacingX, L.tileSpacingY, labelH, nameShown);
     const double tileW = box.width;
     const double tileH = box.height;
     // Without a background, no padding either: just the apps.
@@ -2960,7 +2989,6 @@ FrameworkElement BuildTile(const Model& model,
     xc::StackPanel outer;
     outer.Spacing(L.labelSpacing);
     outer.Width(tileW);
-    outer.Margin(ThicknessHelper::FromLengths(-box.outsetX, 0, 0, 0));
 
     xc::Border tile;
     tile.Width(tileW);
@@ -3306,88 +3334,56 @@ void ApplySectionVisibility() {
     }
 }
 
-// A row holds as many tiles as fit, and at least as many as roughly fill a
-// default-width Start menu, which holds 3 default tiles (154
-// wide, 30 apart) like Start's own category view: 3 default, 4 small or 2
-// large tiles. They're scaled down a little if they don't quite fit.
-constexpr double kReferenceRowWidth = 3 * 154 + 2 * 30;
-
 // The width the groups get in Start, saved for the settings window (another
 // process) so its preview lays the tiles out in rows like Start does.
 constexpr PCWSTR kStartRowWidthValue = L"startRowWidth";
 
-// Whole tiles that fit a default-width Start menu (rounded down, so big
-// tiles, as with the Large preset, don't make the row wider than Start).
-int MinAutoColumns(LayoutConfig const& L) {
-    double cell = L.tileSize + L.tileSpacingX;
-    int n = (int)std::floor((kReferenceRowWidth + L.tileSpacingX) / cell +
-                            0.05);
-    return std::max(n, 1);
+// The width the row of groups is fitted to: the host's, in whole DIPs
+// (rounded down, so the row is never a fraction wider than the host and
+// shrunk by the Viewbox for it). 0 before the host is laid out.
+double HostRowWidth() {
+    double w = g_attach.host ? g_attach.host.ActualWidth() : 0;
+    return w > 0 ? std::floor(w) : 0;
 }
 
-// Half cells per row for the host's width.
-int RowHalves(LayoutConfig const& L, double width) {
-    double half = (L.tileSize + L.tileSpacingX) / 2;
-    return std::max(FitHalves(width, half, L.tileSpacingX),
-                    2 * MinAutoColumns(L));
-}
-
-// Whether a tile is wider than `halves` (0 = no limit known).
-bool AnyWiderThan(Model const& m, int halves) {
-    return std::any_of(m.groups.begin(), m.groups.end(), [&](auto const& c) {
-        return halves > 0 && c.layout.spanHalfColumns > halves;
-    });
-}
-
-// Sets the tiles per row for the host's current width.
+// Lays the row out for the host's current width: the tiles are fitted to it
+// (FitRow), so they're built again when the width changes. Called after
+// every layout pass; returns early when nothing changed.
 void ApplyColumns() {
     auto wrap = g_attach.wrap.get();
     auto frame = g_attach.wrapFrame.get();
     if (!wrap || !frame || !g_model || !g_attach.host) {
         return;
     }
-    const auto& L = g_model->layout;
-    // Counted in half cells, so a narrow (1 × 2) tile still goes on a row
-    // that has room for half a cell but not a whole one.
-    double half = (L.tileSize + L.tileSpacingX) / 2;
-    double width = g_attach.host.ActualWidth();
-    static int published = -1;
-    int rounded = (int)std::lround(width);
-    if (rounded > 0 && rounded != published) {
-        published = rounded;
-        Wh_SetIntValue(kStartRowWidthValue, rounded);
-    }
-    int halves = RowHalves(L, width);
-    // A tile wider than the row is built as wide as the row (rather than
-    // making the row wider, and the whole of it shrunk to fit Start): built
-    // again when the row's width changes what that is.
-    if (width > 0 && halves != g_attach.builtHalves &&
-        (AnyWiderThan(*g_model, halves) ||
-         AnyWiderThan(*g_model, g_attach.builtHalves) ||
-         g_attach.builtHalves == 0)) {
-        if (AnyWiderThan(*g_model, halves) ||
-            AnyWiderThan(*g_model, g_attach.builtHalves)) {
-            g_attach.builtHalves = halves;  // once per change
-            // Not from inside this layout pass.
-            PostToUi([] { RebuildHostContent(); });
-            return;
-        }
-        g_attach.builtHalves = halves;
-    }
-    if (halves == g_attach.columns) {
+    double width = HostRowWidth();
+    if (width <= 0 || width == g_attach.builtWidth) {
         return;
     }
-    g_attach.columns = halves;
-    wrap.MaximumRowsOrColumns(halves);
-    // A single spot wide tile without a name reaches half a gap further
-    // (TileBoxFor): in the last column, past the row; room for it.
-    bool narrowWide = std::any_of(
-        g_model->groups.begin(), g_model->groups.end(), [&](auto const& c) {
-            return c.layout.spanHalfColumns == 1 &&
-                   !(L.showLabels && c.showLabel);
-        });
-    frame.Width(RowFrameWidth(halves, half, L.tileSpacingX) +
-                (narrowWide ? L.tileSpacingX / 2 : 0));
+    static int published = -1;
+    if ((int)width != published) {
+        published = (int)width;
+        Wh_SetIntValue(kStartRowWidthValue, published);
+    }
+    // Guard against a host whose width would follow the tiles: a few
+    // rebuilds in a row, then the tiles stay as they are (the Viewbox still
+    // fits them).
+    static ULONGLONG windowStart = 0;
+    static int rebuilds = 0;
+    ULONGLONG now = GetTickCount64();
+    if (now - windowStart > 2000) {
+        windowStart = now;
+        rebuilds = 0;
+    }
+    if (++rebuilds > 6) {
+        if (rebuilds == 7) {
+            Wh_Log(L"Row: the width keeps changing (%.1f), not refitting",
+                   width);
+        }
+        return;
+    }
+    g_attach.builtWidth = width;  // once per change
+    // Not from inside this layout pass.
+    PostToUi([] { RebuildHostContent(); });
 }
 
 // --- Rearranging in Start -----------------------------------------------------
@@ -3929,20 +3925,35 @@ void RebuildHostContent() {
     g_attach.tiles.clear();
     g_imageSources.clear();
 
+    // The row, fitted to the host's width (FitRow): the tiles are a little
+    // wider or narrower than set so the row ends at the host's right edge.
+    // Before the host is laid out, the set size; ApplyColumns builds the
+    // tiles again once its width is known.
+    const double rowWidth = HostRowWidth();
+    const RowFit row = FitRow(rowWidth, L.tileSize, L.tileSpacingX);
+    g_attach.builtWidth = rowWidth;
+
     xc::VariableSizedWrapGrid wrap;
     wrap.Orientation(xc::Orientation::Horizontal);
-    wrap.ItemWidth((L.tileSize + L.tileSpacingX) / 2);  // half cells
+    wrap.ItemWidth(row.half);  // half cells
     double labelH = L.showLabels ? L.labelSpacing + L.labelFontSize * 1.4 : 0;
     wrap.ItemHeight((L.tileSize + labelH + L.tileSpacingY) / 2);  // half rows
+    // Counted in half cells, so a narrow (1 x 2) tile still goes on a row
+    // that has room for half a cell but not a whole one.
+    wrap.MaximumRowsOrColumns(row.halves);
     wrap.HorizontalAlignment(HorizontalAlignment::Left);
     // Pull the trailing spacing out so the first/last tiles align to edges:
-    // the frame is exactly as wide as the tiles of a row and their gaps.
-    wrap.Margin(ThicknessHelper::FromLengths(0, 0, -L.tileSpacingX, 0));
+    // the frame is exactly as wide as the tiles of a row and their gaps
+    // (with a pixel of slack for layout rounding).
+    wrap.Margin(
+        ThicknessHelper::FromLengths(0, 0, -(L.tileSpacingX + kRowSlack), 0));
     xc::Border frame;
     frame.HorizontalAlignment(HorizontalAlignment::Left);
+    frame.Width(RowFrameWidth(row.halves, row.half, L.tileSpacingX));
     frame.Child(wrap);
-    // The row is laid out at full size and scaled down as a whole when it's
-    // wider than the space (instead of wrapping to fewer tiles per row).
+    // A row that can't be fitted (Start narrower than the fewest tiles a
+    // row holds) is scaled down as a whole, instead of wrapping to fewer
+    // tiles per row. A fitted row is as wide as the host: not scaled.
     xc::Viewbox fit;
     fit.Stretch(xm::Stretch::Uniform);
     fit.StretchDirection(xc::StretchDirection::DownOnly);
@@ -3950,20 +3961,15 @@ void RebuildHostContent() {
     fit.Child(frame);
     g_attach.wrap = wrap;
     g_attach.wrapFrame = frame;
-    g_attach.columns = 0;
-    // The row's width, once the host has been laid out.
-    double hostWidth = host.ActualWidth();
-    int rowHalves = hostWidth > 0 ? RowHalves(L, hostWidth) : 0;
-    g_attach.builtHalves = rowHalves;
 
     for (int gi = 0; gi < (int)g_model->groups.size(); gi++) {
-        // No wider than the row: see ApplyColumns.
+        // A tile wider than the row is built as wide as the row.
         Group cat = g_model->groups[gi];
-        if (rowHalves > 0 && cat.layout.spanHalfColumns > rowHalves) {
-            cat.layout.spanHalfColumns = rowHalves;
+        if (cat.layout.spanHalfColumns > row.halves) {
+            cat.layout.spanHalfColumns = row.halves;
         }
         TileParts parts;
-        auto tile = BuildTile(*g_model, cat, dark, &parts);
+        auto tile = BuildTile(*g_model, cat, dark, row.tile, &parts);
         StartTile st;
         st.group = gi;
         st.outer = tile;
@@ -6364,18 +6370,15 @@ class SettingsWindow {
     winrt::weak_ref<xc::Grid> m_appsPanel;
     winrt::weak_ref<winrt::Windows::UI::Xaml::Shapes::Rectangle> m_startOutline;
     void FitBoardRow();
-    int m_boardHalves = 0;  // half cells per row of the board
-    // The board's row: as in Start, with room for a single spot wide tile
-    // without a name, which reaches half a gap further (TileBoxFor).
-    double BoardRowWidth(int halves) {
-        auto const& s = m_model;
-        bool narrowWide = std::any_of(
-            s.groups.begin(), s.groups.end(), [&](EditGroup const& c) {
-                return LayoutOf(c).spanHalfColumns == 1 &&
-                       !(s.labelsShow && ShowsLabel(c));
-            });
-        return RowFrameWidth(halves, (s.tileSize + s.gapX) / 2.0, s.gapX) +
-               (narrowWide ? s.gapX / 2.0 : 0);
+    // The board's row, fitted to Start's width as in Start (FitRow).
+    int m_boardHalves = 0;      // half cells per row of the board
+    double m_boardTile = 0;     // a tile's size across
+    double m_boardHalf = 0;     // a half cell
+    RowFit BoardRowFit() const {
+        return FitRow(m_startRowWidth, m_model.tileSize, m_model.gapX);
+    }
+    double BoardRowWidth(RowFit const& fit) const {
+        return RowFrameWidth(fit.halves, fit.half, m_model.gapX);
     }
     // A group's layout on the board: no wider than its row, as in Start.
     GroupLayout BoardLayoutOf(EditGroup const& g) {
@@ -7822,18 +7825,6 @@ void AddHover(xc::Border const& b, bool dark) {
     });
 }
 
-// Half cells per row on the board, as in Start (see ApplyColumns): as many
-// as fit `width` (Start's), at least those of a default-width Start menu.
-int BoardHalves(EditSettings const& s, double width) {
-    double half = (s.tileSize + s.gapX) / 2;
-    int min = std::max(
-        1, (int)std::floor((kReferenceRowWidth + s.gapX) / (s.tileSize + s.gapX) +
-                           0.05));
-    int fit = FitHalves(width, half, s.gapX);
-    // Wider tiles are drawn as wide as the row, as in Start.
-    return std::max(fit, 2 * min);
-}
-
 // Start apps on the groups board: a grid of icon + name cells.
 constexpr double kPaletteCellWidth = 92;
 constexpr double kPaletteCellHeight = 84;
@@ -8165,23 +8156,26 @@ void SettingsWindow::RebuildBoard() {
         m_boardHost.Child(empty);
         return;
     }
-    double cell = s.tileSize + s.gapX;
     // Rows as in Start: for the width Start last had, or a default-width
     // Start menu's until it has been opened with the mod.
     m_startRowWidth = Wh_GetIntValue(kStartRowWidthValue, 0);
     if (m_startRowWidth <= 0) {
         m_startRowWidth = kReferenceRowWidth;
     }
-    int halves = BoardHalves(s, m_startRowWidth);
+    // Fitted to Start's width, as in Start (see RebuildHostContent).
+    const RowFit row = BoardRowFit();
+    const int halves = row.halves;
     m_boardHalves = halves;
+    m_boardTile = row.tile;
+    m_boardHalf = row.half;
     xc::VariableSizedWrapGrid wrap;
     wrap.Orientation(xc::Orientation::Horizontal);
-    wrap.ItemWidth(cell / 2);  // half cells, as in Start
+    wrap.ItemWidth(row.half);  // half cells, as in Start
     wrap.ItemHeight((s.tileSize + BoardLabelHeight(s) + s.gapY) /
                     2);  // half rows, as in Start
     wrap.MaximumRowsOrColumns(halves);
     wrap.HorizontalAlignment(HorizontalAlignment::Left);
-    wrap.Margin(ThicknessHelper::FromLengths(0, 0, -s.gapX, 0));
+    wrap.Margin(ThicknessHelper::FromLengths(0, 0, -(s.gapX + kRowSlack), 0));
     for (int ci = 0; ci < (int)s.groups.size(); ci++) {
         auto tile = BuildBoardTile(ci, m_board);
         auto lay = BoardLayoutOf(s.groups[ci]);
@@ -8196,7 +8190,7 @@ void SettingsWindow::RebuildBoard() {
     }
     // Same layout as in Start (see RebuildHostContent), shrunk to fit.
     xc::Border frame;
-    frame.Width(BoardRowWidth(halves));
+    frame.Width(BoardRowWidth(row));
     frame.HorizontalAlignment(HorizontalAlignment::Left);
     frame.Child(wrap);
     m_boardWrap = wrap;
@@ -8225,7 +8219,7 @@ void SettingsWindow::RebuildBoard() {
     area.HorizontalAlignment(HorizontalAlignment::Left);
     area.MinWidth(m_startRowWidth + 2 * kOutlinePad);
     m_boardNaturalWidth =
-        std::max(m_startRowWidth, BoardRowWidth(halves)) +
+        std::max(m_startRowWidth, BoardRowWidth(row)) +
         2 * kOutlinePad;
     LayoutAppsPanel();
     area.Children().Append(outline);
@@ -8255,15 +8249,17 @@ void SettingsWindow::RebuildBoard() {
 
 void SettingsWindow::FitBoardRow() {
     auto wrap = m_boardWrap.get();
-    auto frame = m_boardFrame.get();
-    if (!wrap || !frame || !m_boardHost) {
+    if (!wrap || !m_boardHost) {
         return;
     }
-    int halves = BoardHalves(m_model, m_startRowWidth);
-    if (halves != wrap.MaximumRowsOrColumns()) {
-        double half = (m_model.tileSize + m_model.gapX) / 2;
-        wrap.MaximumRowsOrColumns(halves);
-        frame.Width(BoardRowWidth(halves));
+    // The tiles are built for the row's fit (BuildBoard): built again when
+    // a change of the settings changes it. Not from inside this layout pass.
+    RowFit fit = BoardRowFit();
+    if (fit.halves != m_boardHalves ||
+        std::abs(fit.tile - m_boardTile) > 0.25) {
+        m_boardHalves = fit.halves;
+        m_boardTile = fit.tile;
+        Later([this] { RebuildBoard(); });
     }
 }
 
@@ -8319,8 +8315,9 @@ FrameworkElement SettingsWindow::BuildBoardTile(
     double labelH = BoardLabelHeight(s);
     bool nameShown = s.labelsShow && ShowsLabel(cat);
     bool background = ShowsBackground(cat);
-    TileBox box = TileBoxFor(lay.spanHalfColumns, lay.spanHalfRows, s.tileSize,
-                             s.gapX, s.gapY, labelH, nameShown);
+    TileBox box = TileBoxFor(lay.spanHalfColumns, lay.spanHalfRows,
+                             m_boardTile > 0 ? m_boardTile : s.tileSize,
+                             s.tileSize, s.gapX, s.gapY, labelH, nameShown);
     double tileW = box.width;
     double tileH = box.height;
     TileFit tf = FitTile(s.iconSize, tileW, tileH,
@@ -8334,7 +8331,6 @@ FrameworkElement SettingsWindow::BuildBoardTile(
     xc::StackPanel outer;
     outer.Spacing(s.labelSpacing);
     outer.Width(tileW);
-    outer.Margin(ThicknessHelper::FromLengths(-box.outsetX, 0, 0, 0));
     outer.HorizontalAlignment(HorizontalAlignment::Left);
     outer.VerticalAlignment(VerticalAlignment::Top);
 
@@ -9544,7 +9540,8 @@ void SettingsWindow::UpdateDrag(wf::Point p) {
             double labelH = BoardLabelHeight(s);
             double w = d.startW + (p.X - d.start.X) / d.scale;
             double h = d.startH + (p.Y - d.start.Y) / d.scale;
-            double spotW = (s.tileSize + s.gapX) / 2;
+            double spotW =
+                m_boardHalf > 0 ? m_boardHalf : (s.tileSize + s.gapX) / 2;
             double spotH = (s.tileSize + s.gapY + labelH) / 2;
             double c = Clamp((w + s.gapX) / spotW, 1, 6);
             double r = Clamp((h + s.gapY + labelH) / spotH, 1, 6);
