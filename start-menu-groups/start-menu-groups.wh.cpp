@@ -78,13 +78,13 @@ The window is hosted by File Explorer — the mod also loads into `explorer.exe`
 The groups can be rearranged right in Start, with the mouse:
 
 * **Move a group** — drag its tile by its background (between the apps), or drag an app on its own (a 1 × 1 tile), and drop it before or after another tile.
-* **Move an app** — drag it within its group to reorder it, or onto another group to move it there. Dropped on a group's overflow cluster, it goes at the end of the group. With *Sort apps by name* on, apps keep their sorted order, so they can only be moved to another group.
+* **Move an app** — drag it within its group to reorder it, or onto another group to move it there. Dropped on a group's overflow cluster, it goes at the end of the group. Dropped outside the tiles (between them, or below the last one), it becomes an app on its own (a 1 × 1 tile) there, as in the settings window. An app on its own dropped onto a group goes into that group. With *Sort apps by name* on, apps keep their sorted order, so they can only be moved to another group.
 
 The new order shows right away and stays: Start keeps it in the mod's own storage, which needs no administrator prompt. Windhawk's **Settings** tab still shows the order from before. The settings window shows Start's order, and saving there writes it into the mod's settings (and Start's order is then no longer kept on its own).
 
 Changes made in Windhawk are kept as well: Start's order is applied on top of them, matching groups by name and apps by their settings. New groups and apps go where they are in the settings. A drag in Start made while the settings window is open is replaced by what the window saves.
 
-Not supported in Start (use the settings window): resizing tiles, adding or removing apps, making an app on its own into a group, rearranging the apps of an opened group or folder, moving apps into or out of a folder, and dragging with touch.
+Not supported in Start (use the settings window): resizing tiles, adding or removing apps, making an app on its own into a group or dropping an app onto it, rearranging the apps of an opened group or folder, moving apps into or out of a folder, and dragging with touch.
 
 ## Tile size and apps in the tile
 
@@ -373,10 +373,16 @@ Empty groups are hidden. None of Start's own sections are hidden by default. Eve
   - size: 154
     $name: Tile size
     $description: Width and height of a group tile. Start's own tiles are 154. Tiles are made a little wider or narrower so the rows fill Start's width.
-  - gapX: 30
+  - gapX: 25
     $name: Horizontal gap between tiles
   - gapY: 20
     $name: Vertical gap between rows
+  - marginLeft: 0
+    $name: Left spacing
+    $description: Moves the groups' left edge from where Start lines them up, in DIPs (-100 to 100). Positive moves it in, negative out. 0 = Start's own.
+  - marginRight: 0
+    $name: Right spacing
+    $description: Moves the groups' right edge from where Start lines them up, in DIPs (-100 to 100). Positive moves it in, negative out. 0 = Start's own.
   - padding: 8
     $name: Padding inside a tile
   - cornerRadius: 8
@@ -489,8 +495,12 @@ namespace xmi = winrt::Windows::UI::Xaml::Media::Imaging;
 struct LayoutConfig {
     // Defaults match Start's built-in category view (in DIPs).
     double tileSize = 154;
-    double tileSpacingX = 30;
+    double tileSpacingX = 25;
     double tileSpacingY = 20;
+    // Added to the space Start leaves left and right of the groups (see
+    // HostMargin): positive moves that edge in, negative out.
+    double marginLeft = 0;
+    double marginRight = 0;
     double tilePadding = 8;
     double iconSize = 32;
     double iconSpacing = 5;
@@ -663,7 +673,9 @@ struct GroupSetting {
     bool showLabel = true;       // the name under the tile
     bool showBackground = true;  // off: no background, border or padding
     std::vector<ItemSetting> items;
-    int raw = -1;  // its index in the saved settings (see ItemSetting::rawGroup)
+    // Its index in the saved settings (see ItemSetting::rawGroup). Made in
+    // Start, not saved yet: -2, -3, ... (see MakeStartGroup).
+    int raw = -1;
 };
 
 // Read on the Windhawk thread, snapshotted by workers under the mutex.
@@ -707,7 +719,10 @@ ModSettings g_settings;
 // in the settings; keys that are no longer there are skipped.
 //
 // Stored as lines: a "v1" header, then "g\t<key>" for a group followed by
-// "i\t<key>" for each of its items.
+// "i\t<key>" for each of its items. An app dragged out of its group in
+// Start gets a group of its own there (an app on its own, 1 x 1): that's
+// "n\t<name>" instead of "g", followed by its item. Dropped when its items
+// are gone.
 
 constexpr PCWSTR kStartOrderValue = L"startOrder";
 
@@ -784,8 +799,9 @@ std::wstring UnescapeOrderKey(std::wstring_view s) {
 // The order: the groups by their raw (saved) index, each with its items as
 // raw (group, item) indices.
 struct OrderedGroup {
-    int group;
+    int group;  // -1: made in Start (an app on its own, named newName)
     std::vector<std::pair<int, int>> items;
+    std::wstring newName;
 };
 
 // The order `value` gives the groups as saved (`raw`). Always every group and
@@ -832,6 +848,8 @@ std::vector<OrderedGroup> PlanStartOrder(std::vector<G> const& raw,
                     groupUsed[it->second] = 1;
                     cur = &plan.emplace_back(OrderedGroup{it->second, {}});
                 }
+            } else if (line[0] == L'n') {
+                cur = &plan.emplace_back(OrderedGroup{-1, {}, key});
             } else if (line[0] == L'i' && cur) {
                 auto it = itemByKey.find(key);
                 if (it != itemByKey.end()) {
@@ -852,7 +870,7 @@ std::vector<OrderedGroup> PlanStartOrder(std::vector<G> const& raw,
         }
         size_t at = 0;
         for (size_t k = 0; k < plan.size(); k++) {
-            if (plan[k].group == g - 1) {
+            if (g > 0 && plan[k].group == g - 1) {
                 at = k + 1;
                 break;
             }
@@ -862,6 +880,9 @@ std::vector<OrderedGroup> PlanStartOrder(std::vector<G> const& raw,
     }
     // Items it doesn't list: at the end of their own group.
     for (auto& og : plan) {
+        if (og.group < 0) {
+            continue;
+        }
         for (int i = 0; i < (int)raw[og.group].items.size(); i++) {
             if (!itemUsed[og.group][i]) {
                 itemUsed[og.group][i] = 1;
@@ -869,19 +890,32 @@ std::vector<OrderedGroup> PlanStartOrder(std::vector<G> const& raw,
             }
         }
     }
+    // Groups made in Start whose apps are all gone.
+    std::erase_if(plan, [](OrderedGroup const& og) {
+        return og.group < 0 && og.items.empty();
+    });
     return plan;
 }
 
+// The groups in the order `plan` gives them. A group made in Start is set up
+// by MakeStartGroup (an overload for each G, found when this is used).
 template <typename G>
 std::vector<G> ApplyStartOrder(std::vector<G> const& raw,
                                std::vector<OrderedGroup> const& plan) {
     std::vector<G> out;
     out.reserve(plan.size());
+    int made = 0;
     for (auto const& og : plan) {
-        G g = raw[og.group];
+        G g = og.group >= 0 ? raw[og.group]
+                            : MakeStartGroup(og.newName, made++, (G*)nullptr);
         g.items.clear();
         for (auto [gi, ii] : og.items) {
             g.items.push_back(raw[gi].items[ii]);
+        }
+        // An app on its own whose app was dragged into a group in Start.
+        if (g.items.empty() && og.group >= 0 &&
+            !raw[og.group].items.empty() && IsSingleApp(g)) {
+            continue;
         }
         out.push_back(std::move(g));
     }
@@ -896,12 +930,18 @@ std::wstring StartOrderValue(ModSettings const& s) {
     std::wstring out = L"v1\n";
     for (int k = 0; k < (int)s.groups.size(); k++) {
         auto const& g = s.groups[k];
-        if (g.raw < 0 || g.raw >= n) {
+        if (g.raw >= n) {
             return L"";
         }
-        same = same && g.raw == k &&
-               g.items.size() == s.rawItemKeys[k].size();
-        out += L"g\t" + EscapeOrderKey(s.rawGroupKeys[g.raw]) + L"\n";
+        if (g.raw < 0) {
+            // Made in Start (see MakeStartGroup).
+            same = false;
+            out += L"n\t" + EscapeOrderKey(g.name) + L"\n";
+        } else {
+            same = same && g.raw == k &&
+                   g.items.size() == s.rawItemKeys[k].size();
+            out += L"g\t" + EscapeOrderKey(s.rawGroupKeys[g.raw]) + L"\n";
+        }
         for (int j = 0; j < (int)g.items.size(); j++) {
             auto const& it = g.items[j];
             if (it.rawGroup < 0 || it.rawGroup >= n || it.rawItem < 0 ||
@@ -1004,6 +1044,25 @@ GroupLayout MakeLayout(std::wstring const& size, std::wstring const& grid) {
         l.iconRows = std::min(h, kMaxGridRows);
     }
     return l;
+}
+
+// An app on its own: a one-spot (1 x 1) tile (see the EditGroup overload).
+bool IsSingleApp(GroupSetting const& g) {
+    return g.layout.spanHalfColumns == 1 && g.layout.spanHalfRows == 1;
+}
+
+// A group made in Start, the `index`-th (see "Order arranged in Start"): an
+// app on its own, one spot without a name or background. Not saved in the
+// settings: its raw index is -2, -3, ..., which tells the groups apart.
+GroupSetting MakeStartGroup(std::wstring const& name, int index,
+                            GroupSetting*) {
+    GroupSetting g;
+    g.name = name;
+    g.layout = MakeLayout(L"1x1", kAutoGrid);
+    g.showLabel = false;
+    g.showBackground = false;
+    g.raw = -2 - index;
+    return g;
 }
 
 // A group's saved tile size. Settings from before tiles had a size of
@@ -1171,10 +1230,16 @@ struct StartDrag {
     FrameworkElement ghost{nullptr};    // follows the pointer
     xc::Border indicator{nullptr};      // where it goes
     // Where it goes: before or after an app (targetApp) or a tile, or at
-    // the end of a group (targetApp -1). targetTile -1: nowhere.
+    // the end of a group (targetApp -1). targetTile -1: nowhere. newGroup:
+    // an app out of its group, into a group of its own before or after the
+    // tile targetTile.
     int targetTile = -1;
     int targetApp = -1;
     bool after = false;
+    bool newGroup = false;
+    // An app on its own (a group drag) into the group targetTile, as an app
+    // drag goes; its own tile goes.
+    bool intoGroup = false;
 };
 
 // Everything below holds XAML objects of Start's UI thread. They're released
@@ -1219,6 +1284,9 @@ struct Attachment {
     winrt::weak_ref<xc::Grid> dragRoot;
     winrt::weak_ref<xc::Canvas> dragOverlay;
     StartDrag drag;
+    // The left inset of Start's "Pinned" title: the groups' spacing left and
+    // right unless set (see HostMargin).
+    double inset = 0;
 };
 [[clang::no_destroy]] Attachment g_attach;
 
@@ -1229,6 +1297,9 @@ struct Attachment {
 double Clamp(double v, double lo, double hi) {
     return v < lo ? lo : (v > hi ? hi : v);
 }
+
+// The left and right spacing settings' range, in DIPs from Start's own.
+constexpr int kMaxSpacing = 100;
 
 bool ParseColor(const std::wstring& s, winrt::Windows::UI::Color& out) {
     if (s.size() < 7 || s[0] != L'#') {
@@ -2283,6 +2354,7 @@ std::shared_ptr<Model> LoadModel() {
 // ---------------------------------------------------------------------------
 
 void RebuildHostContent();
+winrt::Windows::UI::Xaml::Thickness HostMargin();
 
 [[clang::no_destroy]] std::unordered_map<std::wstring, xm::ImageSource>
     g_imageSources;  // UI thread
@@ -3409,6 +3481,8 @@ struct StartDrop {
     int tile = -1, app = -1;
     int targetTile = -1, targetApp = -1;
     bool after = false;
+    bool newGroup = false;   // see StartDrag::newGroup
+    bool intoGroup = false;  // see StartDrag::intoGroup
     std::shared_ptr<Model> model;
 };
 
@@ -3494,7 +3568,28 @@ void ApplyStartDrop(StartDrop const& d) {
         if (sg < 0 || tg < 0) {
             return;
         }
-        if (d.group) {
+        // Where an app dropped on the group tg goes: before or after
+        // targetApp, or at the end. -1 if that app isn't found.
+        auto insertAt = [&] {
+            if (d.targetApp < 0) {
+                return (int)gs[tg].items.size();
+            }
+            int ti = findItem(tg, mg[d.targetTile].apps[d.targetApp]);
+            return ti < 0 ? -1 : d.after ? ti + 1 : ti;
+        };
+        if (d.group && d.intoGroup) {
+            // An app on its own into another group: its tile goes.
+            int to = insertAt();
+            if (sg == tg || to < 0 || gs[sg].items.empty()) {
+                return;
+            }
+            gs[tg].items.insert(gs[tg].items.begin() + to,
+                                std::move(gs[sg].items.front()));
+            gs[sg].items.erase(gs[sg].items.begin());
+            if (gs[sg].items.empty()) {
+                gs.erase(gs.begin() + sg);
+            }
+        } else if (d.group) {
             int to = d.after ? tg + 1 : tg;
             if (to > sg) {
                 to--;
@@ -3505,18 +3600,29 @@ void ApplyStartDrop(StartDrop const& d) {
             GroupSetting moved = std::move(gs[sg]);
             gs.erase(gs.begin() + sg);
             gs.insert(gs.begin() + to, std::move(moved));
-        } else {
+        } else if (d.newGroup) {
+            // Out of its group: a group of its own (an app on its own), with
+            // a raw index no other group has (see MakeStartGroup).
             int si = findItem(sg, mg[d.tile].apps[d.app]);
             if (si < 0) {
                 return;
             }
-            int to = (int)gs[tg].items.size();
-            if (d.targetApp >= 0) {
-                int ti = findItem(tg, mg[d.targetTile].apps[d.targetApp]);
-                if (ti < 0) {
-                    return;
+            int made = 0;
+            for (auto const& g : gs) {
+                if (g.raw <= -2) {
+                    made = std::max(made, -1 - g.raw);
                 }
-                to = d.after ? ti + 1 : ti;
+            }
+            GroupSetting g = MakeStartGroup(mg[d.tile].apps[d.app].name, made,
+                                            (GroupSetting*)nullptr);
+            g.items.push_back(std::move(gs[sg].items[si]));
+            gs[sg].items.erase(gs[sg].items.begin() + si);
+            gs.insert(gs.begin() + (d.after ? tg + 1 : tg), std::move(g));
+        } else {
+            int si = findItem(sg, mg[d.tile].apps[d.app]);
+            int to = insertAt();
+            if (si < 0 || to < 0) {
+                return;
             }
             if (sg == tg) {
                 if (to > si) {
@@ -3558,8 +3664,9 @@ void EndStartDrag(bool drop) {
     if (!drop || !d.active || d.targetTile < 0) {
         return;
     }
-    StartDrop dropped{d.group,      d.tile,      d.app,  d.targetTile,
-                      d.targetApp, d.after, d.model};
+    StartDrop dropped{d.group,     d.tile,  d.app,      d.targetTile,
+                      d.targetApp, d.after, d.newGroup, d.intoGroup,
+                      d.model};
     // After this pointer event: rebuilding the tiles removes the element
     // that has the pointer capture.
     PostToUi([dropped] { ApplyStartDrop(dropped); });
@@ -3672,66 +3779,15 @@ void UpdateStartDrag(wf::Point p) {
     d.targetTile = -1;
     d.targetApp = -1;
     d.after = false;
+    d.newGroup = false;
+    d.intoGroup = false;
 
-    if (!d.group) {
-        for (auto const& t : g_attach.tiles) {
-            auto tileEl = t.tile.get();
-            if (!tileEl || t.group < 0 || t.group >= (int)groups.size()) {
-                continue;
-            }
-            auto b = BoundsIn(tileEl, root);
-            if (!RectContains(b, p)) {
-                continue;
-            }
-            // Not onto an app on its own (that makes a group: the settings
-            // window does it).
-            if (IsSingleAppTile(groups[t.group])) {
-                break;
-            }
-            bool sameGroup = t.group == d.tile;
-            if (L.sortAppsByName) {
-                // Sorted anyway: only to another group, at the end.
-                if (!sameGroup) {
-                    d.targetTile = t.group;
-                    show(b, true);
-                }
-                break;
-            }
-            d.targetTile = t.group;
-            wf::Rect ind = b;
-            bool outline = true;
-            // Before or after the app under the pointer; on the overflow
-            // cluster or elsewhere on the tile, at the end.
-            for (auto const& [weakBtn, i] : t.apps) {
-                auto btn = weakBtn.get();
-                if (!btn) {
-                    continue;
-                }
-                auto cb = BoundsIn(btn, root);
-                if (!RectContains(cb, p)) {
-                    continue;
-                }
-                d.after = p.X > cb.X + cb.Width / 2;
-                d.targetApp = i;
-                ind = {d.after ? cb.X + cb.Width - 1.5f : cb.X - 1.5f,
-                       cb.Y + 4, 3, std::max(0.0f, cb.Height - 8)};
-                outline = false;
-                break;
-            }
-            if (sameGroup && d.targetApp == d.app) {
-                d.targetTile = -1;  // onto itself
-                break;
-            }
-            show(ind, outline);
-            break;
-        }
-    } else {
-        // The nearest tile of the row under the pointer (on a tile, in a gap,
-        // or under a tile where its name is): before or after it.
-        float gapX = (float)(L.tileSpacingX * d.scale / 2);
-        float gapY = (float)(L.tileSpacingY * d.scale / 2);
+    // The nearest tile of the row under the pointer (on a tile, in a gap, or
+    // under a tile where its name is), and its bounds; -1 if none.
+    float gapX = (float)(L.tileSpacingX * d.scale / 2);
+    float gapY = (float)(L.tileSpacingY * d.scale / 2);
+    auto nearestInRow = [&](wf::Rect& best) {
         float bestDist = 1e9f;
-        wf::Rect best{};
         int bestTile = -1;
         for (auto const& t : g_attach.tiles) {
             auto outer = t.outer.get();
@@ -3754,13 +3810,130 @@ void UpdateStartDrag(wf::Point p) {
                 bestTile = t.group;
             }
         }
+        return bestTile;
+    };
+    // A bar in the gap before or after the tile at `b`.
+    auto showBetween = [&](wf::Rect const& b, bool after) {
+        show({after ? b.X + b.Width + gapX - 1.5f : b.X - gapX - 1.5f, b.Y, 3,
+              b.Height},
+             false);
+    };
+    // The app dragged (or an app on its own) dropped onto the tile `t` (at
+    // `b`, not an app on its own): before or after the app under the
+    // pointer; on the overflow cluster or elsewhere on the tile, at the end.
+    auto dropOnto = [&](StartTile const& t, wf::Rect const& b) {
+        bool sameGroup = t.group == d.tile;
+        if (L.sortAppsByName) {
+            // Sorted anyway: only to another group, at the end.
+            if (!sameGroup) {
+                d.targetTile = t.group;
+                show(b, true);
+            }
+            return;
+        }
+        d.targetTile = t.group;
+        wf::Rect ind = b;
+        bool outline = true;
+        for (auto const& [weakBtn, i] : t.apps) {
+            auto btn = weakBtn.get();
+            if (!btn) {
+                continue;
+            }
+            auto cb = BoundsIn(btn, root);
+            if (!RectContains(cb, p)) {
+                continue;
+            }
+            d.after = p.X > cb.X + cb.Width / 2;
+            d.targetApp = i;
+            ind = {d.after ? cb.X + cb.Width - 1.5f : cb.X - 1.5f, cb.Y + 4, 3,
+                   std::max(0.0f, cb.Height - 8)};
+            outline = false;
+            break;
+        }
+        if (sameGroup && d.targetApp == d.app) {
+            d.targetTile = -1;  // onto itself
+            d.targetApp = -1;
+            d.after = false;
+            return;
+        }
+        show(ind, outline);
+    };
+
+    if (!d.group) {
+        bool overTile = false;
+        for (auto const& t : g_attach.tiles) {
+            auto tileEl = t.tile.get();
+            if (!tileEl || t.group < 0 || t.group >= (int)groups.size()) {
+                continue;
+            }
+            auto b = BoundsIn(tileEl, root);
+            if (!RectContains(b, p)) {
+                continue;
+            }
+            overTile = true;
+            // Not onto an app on its own (that makes a group: the settings
+            // window does it).
+            if (!IsSingleAppTile(groups[t.group])) {
+                dropOnto(t, b);
+            }
+            break;
+        }
+        // Out of the tiles, among the groups (or a little below them): a
+        // group of its own, an app on its own (as in the settings window),
+        // before or after the nearest tile of that row, or else at the end.
+        float below = (float)(L.tileSize * d.scale);
+        if (!overTile && !g_attach.tiles.empty() && p.X >= 0 &&
+            p.X <= root.ActualWidth() && p.Y >= 0 &&
+            p.Y <= root.ActualHeight() + below) {
+            wf::Rect best{};
+            int bestTile = nearestInRow(best);
+            if (bestTile >= 0) {
+                d.after = p.X >= best.X + best.Width / 2;
+            } else {
+                auto const& last = g_attach.tiles.back();
+                auto tileEl = last.tile.get();
+                if (tileEl && last.group >= 0 &&
+                    last.group < (int)groups.size()) {
+                    best = BoundsIn(tileEl, root);
+                    bestTile = last.group;
+                    d.after = true;
+                }
+            }
+            if (bestTile >= 0) {
+                d.targetTile = bestTile;
+                d.newGroup = true;
+                showBetween(best, d.after);
+            }
+        }
+    } else {
+        // An app on its own over a group's tile: into that group (as in the
+        // settings window). Near the tile's sides, it's moved before or
+        // after the tile, like a group.
+        auto const& cat = groups[d.tile];
+        if (IsSingleAppTile(cat) && !cat.apps.empty()) {
+            for (auto const& t : g_attach.tiles) {
+                auto tileEl = t.tile.get();
+                if (!tileEl || t.group < 0 || t.group >= (int)groups.size() ||
+                    t.group == d.tile || IsSingleAppTile(groups[t.group])) {
+                    continue;
+                }
+                auto b = BoundsIn(tileEl, root);
+                float edge = std::min(b.Width * 0.15f, 24.0f);
+                if (RectContains(b, p) && p.X > b.X + edge &&
+                    p.X < b.X + b.Width - edge) {
+                    dropOnto(t, b);
+                    d.intoGroup = d.targetTile >= 0;
+                    break;
+                }
+            }
+        }
+        // Before or after the nearest tile of the row under the pointer.
+        wf::Rect best{};
+        int bestTile = d.intoGroup ? -1 : nearestInRow(best);
         if (bestTile >= 0 && bestTile != d.tile) {
             d.after = p.X >= best.X + best.Width / 2;
             d.targetTile = bestTile;
-            show({d.after ? best.X + best.Width + gapX - 1.5f
-                          : best.X - gapX - 1.5f,
-                  best.Y, 3, best.Height},
-                 false);
+            showBetween(best, d.after);
         }
     }
     if (d.targetTile < 0) {
@@ -3922,6 +4095,9 @@ void RebuildHostContent() {
     if (g_attach.drag.pressed) {
         EndStartDrag(false);
     }
+    // The left and right spacing may have changed; a new width builds the
+    // tiles again (see ApplyColumns).
+    host.Margin(HostMargin());
     g_attach.tiles.clear();
     g_imageSources.clear();
 
@@ -4044,6 +4220,17 @@ void RebuildHostContent() {
 // Space above and below the groups, like between Start's own sections.
 constexpr double kGapTop = 24;
 constexpr double kGapBottom = 8;
+
+// The host's margin: Start's inset (aligned with its "Pinned" title, the
+// same on the right), moved by the left and right spacing set.
+winrt::Windows::UI::Xaml::Thickness HostMargin() {
+    double left = g_attach.inset, right = g_attach.inset;
+    if (g_model) {
+        left += g_model->layout.marginLeft;
+        right += g_model->layout.marginRight;
+    }
+    return {left, kGapTop, right, kGapBottom};
+}
 
 void Detach() {
     auto target = g_attach.target.get();
@@ -4321,7 +4508,8 @@ bool AttachInHeaderGrid(FrameworkElement header) {
         }
     } catch (...) {
     }
-    host.Margin({inset, kGapTop, inset, kGapBottom});
+    g_attach.inset = inset;
+    host.Margin(HostMargin());
     host.HorizontalAlignment(HorizontalAlignment::Stretch);
 
     if (footerList) {
@@ -5066,6 +5254,9 @@ void LoadSettings() {
     L.tileSize = GetNumber(L"tiles.size", 60, 600);
     L.tileSpacingX = GetNumber(L"tiles.gapX", 0, 200);
     L.tileSpacingY = GetNumber(L"tiles.gapY", 0, 200);
+    L.marginLeft = GetNumber(L"tiles.marginLeft", -kMaxSpacing, kMaxSpacing);
+    L.marginRight =
+        GetNumber(L"tiles.marginRight", -kMaxSpacing, kMaxSpacing);
     L.tilePadding = GetNumber(L"tiles.padding", 0, 100);
     L.cornerRadius = GetNumber(L"tiles.cornerRadius", 0, 100);
     L.borderThickness = GetNumber(L"tiles.borderThickness", 0, 10);
@@ -5211,6 +5402,17 @@ EditGroup MakeSingleApp(EditItem item) {
     return g;
 }
 
+// A group made in Start (see the GroupSetting overload): an app on its own.
+EditGroup MakeStartGroup(std::wstring const& name, int, EditGroup*) {
+    EditGroup g;
+    g.name = name;
+    g.tileSize = L"1x1";
+    g.appGrid = kAutoGrid;
+    g.showLabel = false;
+    g.showBackground = false;
+    return g;
+}
+
 // An app on its own made a group (2 x 2, with its name and background).
 void MakeGroupOf(EditGroup& g, std::wstring const& name) {
     g.name = name;
@@ -5252,7 +5454,8 @@ struct EditSettings {
     int expandedColumns = 4;
     bool hidePinned = false, hideRecommended = false, hideAllApps = false;
     // Tiles
-    int tileSize = 154, gapX = 30, gapY = 20, padding = 8;
+    int tileSize = 154, gapX = 25, gapY = 20, padding = 8;
+    int marginLeft = 0, marginRight = 0;  // from Start's own (HostMargin)
     int cornerRadius = 8, borderThickness = 1;
     std::wstring background, border;
     // Icons
@@ -5336,6 +5539,10 @@ EditSettings ReadEditSettings(std::vector<EditGroup>* saved = nullptr) {
     s.tileSize = Wh_GetIntSetting(L"tiles.size");
     s.gapX = Wh_GetIntSetting(L"tiles.gapX");
     s.gapY = Wh_GetIntSetting(L"tiles.gapY");
+    s.marginLeft = std::clamp(Wh_GetIntSetting(L"tiles.marginLeft"),
+                              -kMaxSpacing, kMaxSpacing);
+    s.marginRight = std::clamp(Wh_GetIntSetting(L"tiles.marginRight"),
+                               -kMaxSpacing, kMaxSpacing);
     s.padding = Wh_GetIntSetting(L"tiles.padding");
     s.cornerRadius = Wh_GetIntSetting(L"tiles.cornerRadius");
     s.borderThickness = Wh_GetIntSetting(L"tiles.borderThickness");
@@ -5423,7 +5630,7 @@ struct SizePreset {
 // Large is everything of Default doubled; Small about 3/4 of it. (App
 // names and the opened group follow the icon size, see AppNameFontSize.)
 constexpr SizePreset kSizePresets[] = {
-    {L"Default", 154, 30, 20, 8, 8, 32, 5, 4, 4, 12, 12},
+    {L"Default", 154, 25, 20, 8, 8, 32, 5, 4, 4, 12, 12},
     {L"Small", 120, 20, 16, 6, 8, 24, 4, 4, 4, 11, 8},
     {L"Large", 308, 60, 40, 16, 16, 64, 10, 8, 8, 24, 24},
 };
@@ -5525,6 +5732,14 @@ std::vector<SettingsPage> DescribePages(EditSettings& s) {
                   &s.gapX, 0, 120),
              IntF(L"tiles.gapY", L"\uE8A0", L"Vertical gap", nullptr, &s.gapY,
                   0, 120),
+             IntF(L"tiles.marginLeft", L"\uE8A0", L"Left spacing",
+                  L"Moves the left edge from Start's: positive in, negative "
+                  L"out.",
+                  &s.marginLeft, -kMaxSpacing, kMaxSpacing),
+             IntF(L"tiles.marginRight", L"\uE89F", L"Right spacing",
+                  L"Moves the right edge from Start's: positive in, negative "
+                  L"out.",
+                  &s.marginRight, -kMaxSpacing, kMaxSpacing),
              IntF(L"tiles.cornerRadius", L"\uE91F", L"Corner radius", nullptr,
                   &s.cornerRadius, 0, 40),
              StrF(L"tiles.background", L"\uE790", L"Background color",
@@ -6827,10 +7042,10 @@ FrameworkElement SettingsWindow::FieldControl(Field const& f,
             slider.Minimum(f.min);
             slider.Maximum(f.max);
             slider.StepFrequency(1);
-            slider.Value(*v);
             slider.VerticalAlignment(VerticalAlignment::Center);
             xc::TextBox box;
             box.Width(72);
+            slider.Value(*v);
             box.Text(std::to_wstring(*v));
             int lo = f.min, hi = f.max;
             auto syncing = std::make_shared<bool>(false);
