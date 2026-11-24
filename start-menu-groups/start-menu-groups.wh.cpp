@@ -451,8 +451,10 @@ Empty groups are hidden. None of Start's own sections are hidden by default. Eve
 #include <winrt/Windows.Devices.Input.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Foundation.Numerics.h>
 #include <winrt/Windows.Graphics.Imaging.h>
 #include <winrt/Windows.Storage.Streams.h>
+#include <winrt/Windows.UI.Composition.h>
 #include <winrt/Windows.UI.Core.h>
 #include <winrt/Windows.UI.Input.h>
 #include <winrt/Windows.UI.ViewManagement.h>
@@ -477,6 +479,7 @@ namespace wuc = winrt::Windows::UI::Core;
 namespace xc = winrt::Windows::UI::Xaml::Controls;
 namespace xcp = winrt::Windows::UI::Xaml::Controls::Primitives;
 namespace xm = winrt::Windows::UI::Xaml::Media;
+namespace wcomp = winrt::Windows::UI::Composition;
 namespace xmi = winrt::Windows::UI::Xaml::Media::Imaging;
 
 // ---------------------------------------------------------------------------
@@ -2435,21 +2438,250 @@ xc::Button MakeFlatButton() {
 }
 
 // The opened group's sizes: app cells, spacing and the popup's padding.
+// Like Start's own folders it has a fixed size (at least kFlyoutMinRows
+// rows), whatever the number of apps, and sits centered over Start.
 constexpr double kFlyoutGap = 4, kFlyoutPad = 16;
+constexpr int kFlyoutMinRows = 4;
+// Space kept between the popup and the edges of Start's app area.
+constexpr double kFlyoutMargin = 24;
 
 double FlyoutWidth(int cols, double cell) {
     return cols * cell + (cols - 1) * kFlyoutGap + 2 * kFlyoutPad +
            2;  // + the presenter's border
 }
 
+// `el`'s bounds in its window's (XamlRoot's) coordinates; empty if it isn't
+// laid out.
+wf::Rect RootRect(FrameworkElement const& el) {
+    try {
+        if (el && el.ActualWidth() > 0 && el.ActualHeight() > 0) {
+            return el.TransformToVisual(nullptr).TransformBounds(
+                {0, 0, (float)el.ActualWidth(), (float)el.ActualHeight()});
+        }
+    } catch (...) {
+    }
+    return {0, 0, 0, 0};
+}
+
+// The part of Start the opened group is centered on: the scrolling area
+// holding Start's sections and the groups (Start's window is larger than
+// the menu it shows). Empty if not found.
+wf::Rect StartAppsArea() {
+    auto host = g_attach.host;
+    int depth = 0;
+    for (DependencyObject p = host; p && depth < 16;
+         p = xm::VisualTreeHelper::GetParent(p), depth++) {
+        if (auto sv = p.try_as<xc::ScrollViewer>()) {
+            auto r = RootRect(sv);
+            if (r.Width > 200 && r.Height > 200) {
+                return r;
+            }
+        }
+    }
+    return RootRect(host);
+}
+
+// The open and close animation of the opened group, like Start's folders:
+// it grows out of the cell it was opened from (`origin`, in window
+// coordinates) to its place, and shrinks back into it when it closes.
+// Replaces the flyout's own animation (a slide).
+void AnimateFromOrigin(xc::Flyout const& fly, wf::Rect origin) {
+    try {
+        fly.AreOpenCloseAnimationsEnabled(false);
+    } catch (...) {
+    }
+    Style style = fly.FlyoutPresenterStyle();
+    if (!style) {
+        style = Style(winrt::xaml_typename<xc::FlyoutPresenter>());
+        fly.FlyoutPresenterStyle(style);
+    }
+    if (!style.IsSealed()) {
+        // Rounded like Start's folders.
+        style.Setters().Append(
+            Setter(xc::Control::CornerRadiusProperty(),
+                   winrt::box_value(CornerRadiusHelper::FromUniformRadius(8))));
+        // Hidden until its opening animation starts (else shown at once).
+        style.Setters().Append(
+            Setter(UIElement::OpacityProperty(), winrt::box_value(0.0)));
+    }
+    struct State {
+        winrt::weak_ref<xc::FlyoutPresenter> presenter;
+        bool animated = false;  // it opened with the animation
+        // The offset (X, Y, from its top left) and scale (Width, Height)
+        // that put it over `origin`.
+        wf::Rect from{};
+        bool closing = false;  // closing animation running (or done)
+    };
+    auto state = std::make_shared<State>();
+
+    // `open`: from the origin to its place, else back. It's scaled by its
+    // composition visual, not a XAML transform: XAML draws content under a
+    // scale animation once, at the scale it starts from, and stretches it
+    // (blurry text); composition only scales what XAML drew at full size.
+    auto run = [](std::shared_ptr<State> const& st, bool open,
+                  std::function<void()> done) {
+        auto p = st->presenter.get();
+        wcomp::Visual v{nullptr};
+        if (p && st->animated) {
+            try {
+                v = winrt::Windows::UI::Xaml::Hosting::ElementCompositionPreview::
+                    GetElementVisual(p);
+            } catch (...) {
+            }
+        }
+        if (!v) {
+            if (p) {
+                p.Opacity(1);
+            }
+            if (done) {
+                done();
+            }
+            return;
+        }
+        using namespace std::chrono_literals;
+        auto comp = v.Compositor();
+        const wf::Rect f = st->from;
+        // The point that stays put while the scale changes, so that at the
+        // origin's scale it's over the origin (scale then offset, eased
+        // together).
+        auto center = [](double offset, double scale) {
+            return std::abs(1 - scale) > 0.001 ? (float)(offset / (1 - scale))
+                                               : 0.0f;
+        };
+        v.CenterPoint({center(f.X, f.Width), center(f.Y, f.Height), 0});
+        // Windows' "decelerate" curve to open, "accelerate" to close.
+        auto ease = open ? comp.CreateCubicBezierEasingFunction({0.1f, 0.9f},
+                                                                {0.2f, 1.0f})
+                         : comp.CreateCubicBezierEasingFunction({0.7f, 0.0f},
+                                                                {1.0f, 0.5f});
+        auto linear = comp.CreateLinearEasingFunction();
+        const wf::TimeSpan len = open ? wf::TimeSpan(300ms)
+                                      : wf::TimeSpan(180ms);
+        const winrt::Windows::Foundation::Numerics::float3 small{
+            f.Width, f.Height, 1},
+            full{1, 1, 1};
+        auto scale = comp.CreateVector3KeyFrameAnimation();
+        auto fade = comp.CreateScalarKeyFrameAnimation();
+        if (open) {
+            v.Scale(small);
+            v.Opacity(0);
+            p.Opacity(1);  // the style hid it until now
+            scale.InsertKeyFrame(0, small);
+            scale.InsertKeyFrame(1, full, ease);
+            scale.Duration(len);
+            // Fades in quickly as it starts growing.
+            fade.InsertKeyFrame(0, 0);
+            fade.InsertKeyFrame(1, 1, linear);
+            fade.Duration(wf::TimeSpan(120ms));
+        } else {
+            // From wherever it is (it may still be opening).
+            scale.InsertExpressionKeyFrame(0, L"this.StartingValue");
+            scale.InsertKeyFrame(1, small, ease);
+            scale.Duration(len);
+            // Fades out as it ends shrinking.
+            fade.InsertExpressionKeyFrame(0, L"this.StartingValue");
+            fade.InsertExpressionKeyFrame(0.33f, L"this.StartingValue");
+            fade.InsertKeyFrame(1, 0, linear);
+            fade.Duration(len);
+        }
+        auto batch =
+            comp.CreateScopedBatch(wcomp::CompositionBatchTypes::Animation);
+        v.StartAnimation(L"Scale", scale);
+        v.StartAnimation(L"Opacity", fade);
+        batch.End();
+        if (done) {
+            batch.Completed([done](auto&&, auto&&) { done(); });
+        }
+    };
+
+    fly.Opened([state, origin, run](wf::IInspectable const& sender, auto&&) {
+        auto f = sender.try_as<xc::Flyout>();
+        auto content = f ? f.Content().try_as<FrameworkElement>() : nullptr;
+        xc::FlyoutPresenter presenter{nullptr};
+        int depth = 0;
+        for (DependencyObject p = content; p && depth < 8;
+             p = xm::VisualTreeHelper::GetParent(p), depth++) {
+            if (auto fp = p.try_as<xc::FlyoutPresenter>()) {
+                presenter = fp;
+                break;
+            }
+        }
+        if (!presenter) {
+            return;
+        }
+        state->presenter = presenter;
+        presenter.CornerRadius(CornerRadiusHelper::FromUniformRadius(8));
+        auto r = RootRect(presenter);
+        if (r.Width <= 0 || r.Height <= 0 || origin.Width <= 0 ||
+            origin.Height <= 0 || g_unloading) {
+            presenter.Opacity(1);
+            return;
+        }
+        // In the popup's own coordinates (r may be scaled from them).
+        double kx = presenter.ActualWidth() / r.Width;
+        double ky = presenter.ActualHeight() / r.Height;
+        state->from = {(float)((origin.X - r.X) * kx),
+                       (float)((origin.Y - r.Y) * ky), origin.Width / r.Width,
+                       origin.Height / r.Height};
+        state->animated = true;
+        run(state, true, nullptr);
+    });
+
+    // Closing: shrinks back first, then closes for real.
+    fly.Closing([state, run](xcp::FlyoutBase const& sender,
+                             xcp::FlyoutBaseClosingEventArgs const& args) {
+        if (state->closing || !state->animated || g_unloading ||
+            !state->presenter.get()) {
+            return;
+        }
+        state->closing = true;
+        args.Cancel(true);
+        winrt::weak_ref<xcp::FlyoutBase> weak = sender;
+        run(state, false, [weak] {
+            if (auto f = weak.get()) {
+                f.Hide();
+            }
+        });
+    });
+}
+
 void ShowAppsFlyout(FrameworkElement const& anchor,
+                    wf::Rect origin,
                     std::wstring const& title,
                     std::vector<AppEntry> const& apps,
                     size_t first);
 
+// Shows `fly` at `anchor`, centered over `area` (window coordinates) when
+// its full `size` is known, else below the anchor; growing out of `origin`
+// (AnimateFromOrigin; the anchor if empty).
+void ShowCenteredOver(xc::Flyout const& fly,
+                      FrameworkElement const& anchor,
+                      wf::Rect area,
+                      wf::Size size,
+                      wf::Rect origin) {
+    const wf::Rect tl = RootRect(anchor);
+    // In the anchor's coordinates, which may be scaled (a Viewbox).
+    double x = 0, y = anchor.ActualHeight();
+    if (area.Width > 0 && size.Height > 0 && tl.Width > 0 &&
+        anchor.ActualWidth() > 0) {
+        double scale = tl.Width / anchor.ActualWidth();
+        double left = area.X + (area.Width - size.Width) / 2;
+        double top = area.Y + (area.Height - size.Height) / 2;
+        if (scale > 0) {
+            x = (left - tl.X) / scale;
+            y = (top - tl.Y) / scale;
+        }
+    }
+    AnimateFromOrigin(fly, origin.Width > 0 ? origin : tl);
+    xcp::FlyoutShowOptions opts;
+    opts.Position(wf::Point{(float)x, (float)y});
+    opts.Placement(xcp::FlyoutPlacementMode::BottomEdgeAlignedLeft);
+    fly.ShowAt(anchor, opts);
+}
+
 // An opened group or folder: `apps` from `first` on (for a group, the ones
-// its tile has no room for), under `titleText`. A folder in it opens in its
-// place, below `anchor` (the tile).
+// its tile has no room for), under `titleText`, in `cols` columns. A folder
+// in it opens in its place, tied to `anchor` (the tile).
 xc::Flyout BuildGroupFlyout(const Model& model,
                             std::wstring const& titleText,
                             std::vector<AppEntry> const& apps,
@@ -2459,36 +2691,50 @@ xc::Flyout BuildGroupFlyout(const Model& model,
     const FlyoutLook look = FlyoutLookFor(model.layout.iconSize);
     xc::Flyout fly;
     // Start can only draw inside its own window, so keep the popup within
-    // its bounds (it's shifted in instead of being cut off at the edge), and
-    // open it aligned with the tile rather than centered over it.
+    // its bounds (it's shifted in instead of being cut off at the edge).
+    // It's placed by its top left (see ShowAppsFlyout).
     fly.ShouldConstrainToRootBounds(true);
     fly.Placement(xcp::FlyoutPlacementMode::BottomEdgeAlignedLeft);
-    // Flyouts have a default max width (~456) that would cut wide grids.
+    // Flyouts have a default max size (~456 wide) that would cut the grid.
     Style presenterStyle(winrt::xaml_typename<xc::FlyoutPresenter>());
     presenterStyle.Setters().Append(
         Setter(FrameworkElement::MaxWidthProperty(), winrt::box_value(10000.0)));
+    presenterStyle.Setters().Append(Setter(FrameworkElement::MaxHeightProperty(),
+                                           winrt::box_value(10000.0)));
     presenterStyle.Setters().Append(Setter(
         xc::Control::PaddingProperty(),
         winrt::box_value(ThicknessHelper::FromUniformLength(kFlyoutPad))));
     fly.FlyoutPresenterStyle(presenterStyle);
     TrackFlyout(fly);
 
-    xc::StackPanel root;
-    root.Spacing(12);
+    xc::Grid root;
+    root.RowSpacing(12);
+    xc::RowDefinition titleRow;
+    titleRow.Height(GridLengthHelper::Auto());
+    root.RowDefinitions().Append(titleRow);
+    xc::RowDefinition appsRow;
+    appsRow.Height(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+    root.RowDefinitions().Append(appsRow);
+    root.Width(cols * look.cell + (cols - 1) * kFlyoutGap);
+
+    // The name, centered above the apps like a Start folder's.
     xc::TextBlock title;
     title.Text(titleText);
     title.FontSize(20);
     title.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
-    title.Margin(ThicknessHelper::FromLengths(4, 0, 0, 0));
+    title.Margin(ThicknessHelper::FromLengths(0, 4, 0, 8));
+    title.HorizontalAlignment(HorizontalAlignment::Center);
+    title.TextAlignment(TextAlignment::Center);
     // A long name is cut short instead of widening the popup.
     title.TextWrapping(TextWrapping::NoWrap);
     title.TextTrimming(TextTrimming::CharacterEllipsis);
-    title.MaxWidth(cols * look.cell + (cols - 1) * kFlyoutGap - 4);
+    title.MaxWidth(cols * look.cell + (cols - 1) * kFlyoutGap - 8);
     root.Children().Append(title);
 
     xc::Grid grid;
     grid.ColumnSpacing(kFlyoutGap);
     grid.RowSpacing(kFlyoutGap);
+    grid.VerticalAlignment(VerticalAlignment::Top);
     for (int c = 0; c < cols; c++) {
         xc::ColumnDefinition cd;
         cd.Width(GridLengthHelper::FromPixels(look.cell));
@@ -2524,14 +2770,18 @@ xc::Flyout BuildGroupFlyout(const Model& model,
         btn.Content(sp);
         SetAppTooltip(btn, tb, app.name, model.layout);
         winrt::weak_ref<xc::Flyout> weakFly = fly;
-        btn.Click([app, weakFly, anchor](auto&&, auto&&) {
+        btn.Click([app, weakFly, anchor](wf::IInspectable const& sender,
+                                         auto&&) {
+            // A folder opens from this cell: taken before this popup starts
+            // shrinking away.
+            auto origin = RootRect(sender.try_as<FrameworkElement>());
             if (auto f = weakFly.get()) {
                 f.Hide();
             }
             if (!app.folder) {
                 LaunchApp(app);
             } else if (auto a = anchor.get()) {
-                ShowAppsFlyout(a, app.name, app.children, 0);
+                ShowAppsFlyout(a, origin, app.name, app.children, 0);
             }
         });
         btn.ContextFlyout(BuildAppMenu(app));
@@ -2541,20 +2791,21 @@ xc::Flyout BuildGroupFlyout(const Model& model,
     }
 
     xc::ScrollViewer sv;
-    sv.MaxHeight(480);
     sv.VerticalScrollBarVisibility(xc::ScrollBarVisibility::Auto);
     sv.Content(grid);
+    xc::Grid::SetRow(sv, 1);
     root.Children().Append(sv);
     fly.Content(root);
     return fly;
 }
 
-// Opens a group's or folder's apps (BuildGroupFlyout) below `anchor`, its
-// tile. Built when it opens: Start can only draw inside the visible menu,
-// but a popup may extend past it (its window is larger), and gets cut
-// there. So it gets only as many columns as fit the groups area (and no
-// more than the apps it shows), and is shifted left to stay inside it.
+// Opens a group's or folder's apps (BuildGroupFlyout), tied to `anchor`
+// (its tile), growing out of `origin` (the cell clicked, in window
+// coordinates). Like Start's folders, it's centered over Start's app area,
+// with a fixed size: as many columns as set (or as fit the area) and at
+// least kFlyoutMinRows rows; taller than the area, its apps scroll.
 void ShowAppsFlyout(FrameworkElement const& anchor,
+                    wf::Rect origin,
                     std::wstring const& title,
                     std::vector<AppEntry> const& apps,
                     size_t first) {
@@ -2563,39 +2814,55 @@ void ShowAppsFlyout(FrameworkElement const& anchor,
     if (!t || !model) {
         return;
     }
-    int shown = (int)(apps.size() - std::min(first, apps.size()));
-    int cols = std::clamp(shown, 1, std::max(1, model->layout.flyoutColumns));
-    double x = 0, y = t.ActualHeight();
-    auto host = g_attach.host;
-    if (host && host.XamlRoot() && t.ActualWidth() > 0) {
-        try {
-            auto toRoot = t.TransformToVisual(nullptr);
-            auto tl = toRoot.TransformPoint({0, 0});
-            auto br = toRoot.TransformPoint(
-                {(float)t.ActualWidth(), (float)t.ActualHeight()});
-            double scale = (br.X - tl.X) / t.ActualWidth();
-            auto hostTl = host.TransformToVisual(nullptr).TransformPoint(
-                {0, 0});
-            double left = hostTl.X;
-            double right = left + host.ActualWidth();
-            double cell = FlyoutLookFor(model->layout.iconSize).cell;
-            while (cols > 1 && FlyoutWidth(cols, cell) > right - left) {
-                cols--;
-            }
-            double fx = std::clamp((double)tl.X, left,
-                                   std::max(left, right - FlyoutWidth(cols, cell)));
-            if (scale > 0) {
-                x = (fx - tl.X) / scale;
-            }
-        } catch (...) {
+    const FlyoutLook look = FlyoutLookFor(model->layout.iconSize);
+    const wf::Rect area = StartAppsArea();
+    int cols = std::max(1, model->layout.flyoutColumns);
+    if (area.Width > 0) {
+        while (cols > 1 &&
+               FlyoutWidth(cols, look.cell) > area.Width - 2 * kFlyoutMargin) {
+            cols--;
         }
     }
     auto fly = BuildGroupFlyout(*model, title, apps, cols, first,
                                 winrt::make_weak(t));
-    xcp::FlyoutShowOptions opts;
-    opts.Position(winrt::Windows::Foundation::Point{(float)x, (float)y});
-    opts.Placement(xcp::FlyoutPlacementMode::BottomEdgeAlignedLeft);
-    fly.ShowAt(t, opts);
+
+    // Its height: measured with the apps it has, plus empty rows up to
+    // kFlyoutMinRows, within the area.
+    const double chrome = 2 * kFlyoutPad + 2;  // padding and border
+    const double width = FlyoutWidth(cols, look.cell);
+    double height = 0;
+    if (auto root = fly.Content().try_as<xc::Grid>()) {
+        try {
+            root.Measure({(float)(width - chrome), INFINITY});
+            double h = root.DesiredSize().Height;
+            int shown = (int)(apps.size() - std::min(first, apps.size()));
+            int rows = (shown + cols - 1) / cols;
+            double rowH = look.cell;
+            if (auto sv = root.Children().GetAt(1).try_as<xc::ScrollViewer>()) {
+                if (auto grid = sv.Content().try_as<xc::Grid>();
+                    grid && rows > 0) {
+                    double gh = grid.DesiredSize().Height;
+                    if (gh > 0) {
+                        rowH = (gh - (rows - 1) * kFlyoutGap) / rows;
+                    }
+                }
+            }
+            if (rows < kFlyoutMinRows) {
+                h += (kFlyoutMinRows - rows) * (rowH + kFlyoutGap) -
+                     (rows == 0 ? kFlyoutGap : 0);
+            }
+            if (area.Height > 0) {
+                h = std::min(h, area.Height - 2 * kFlyoutMargin - chrome);
+            }
+            if (h > 0) {
+                root.Height(h);
+                height = h + chrome;
+            }
+        } catch (...) {
+        }
+    }
+
+    ShowCenteredOver(fly, t, area, {(float)width, (float)height}, origin);
 }
 
 // The parts of a tile in Start that a drag finds under the pointer (see
@@ -2718,11 +2985,12 @@ FrameworkElement BuildTile(const Model& model,
         SetAppTooltip(btn, nameText, app.name, L);
         // A folder opens like the group does.
         btn.Click([app, weakTile = winrt::weak_ref<xc::Border>(tile)](
-                      auto&&, auto&&) {
+                      wf::IInspectable const& sender, auto&&) {
             if (!app.folder) {
                 LaunchApp(app);
             } else if (auto t = weakTile.get()) {
-                ShowAppsFlyout(t, app.name, app.children, 0);
+                ShowAppsFlyout(t, RootRect(sender.try_as<FrameworkElement>()),
+                               app.name, app.children, 0);
             }
         });
         btn.ContextFlyout(BuildAppMenu(app));
@@ -2762,9 +3030,11 @@ FrameworkElement BuildTile(const Model& model,
             btn, winrt::box_value(winrt::hstring(
                      L"+" + std::to_wstring(count - singles) + L" more")));
         btn.Click([weakTile = winrt::weak_ref<xc::Border>(tile), name = cat.name,
-                   apps = cat.apps, singles](auto&&, auto&&) {
+                   apps = cat.apps, singles](wf::IInspectable const& sender,
+                                             auto&&) {
             if (auto t = weakTile.get()) {
-                ShowAppsFlyout(t, name, apps, (size_t)singles);
+                ShowAppsFlyout(t, RootRect(sender.try_as<FrameworkElement>()),
+                               name, apps, (size_t)singles);
             }
         });
         xc::Grid::SetRow(btn, (cells - 1) / previewColumns);
@@ -6068,6 +6338,10 @@ class SettingsWindow {
     xc::Border m_flyoutHost{nullptr};
     int m_flyoutCat = -1;
     int m_flyoutFolder = -1;  // the opened folder (item), or -1: the group
+    // Per group (index): its first app in the overflow cluster, as last
+    // built on the board (0: none). The opened group shows those, like
+    // Start's.
+    std::map<int, int> m_overflowFirst;
     winrt::weak_ref<xc::Flyout> m_overflowFlyout;  // the opened group
     void HandDragToBoard(wf::Point p);
     xc::StackPanel m_paletteList{nullptr};
@@ -8050,6 +8324,7 @@ FrameworkElement SettingsWindow::BuildBoardTile(
     int count = (int)cat.items.size();
     bool overflow = s.overflowCluster && count > cells && cells > 1;
     int singles = overflow ? cells - 1 : std::min(count, cells);
+    m_overflowFirst[ci] = overflow ? singles : 0;
 
     for (int i = 0; i < singles; i++) {
         auto const& item = cat.items[i];
@@ -8117,7 +8392,7 @@ FrameworkElement SettingsWindow::BuildBoardTile(
         more.Content(mini);
         xc::ToolTipService::SetToolTip(
             more, Box(L"+" + std::to_wstring(count - singles) +
-                      L" more. Click to see all of them and reorder them."));
+                      L" more. Click to see them and reorder them."));
         WeakElement weakMore = more;
         more.Click([this, ci, weakMore](auto&&, auto&&) {
             if (auto b = weakMore.get()) {
@@ -8276,11 +8551,23 @@ void SettingsWindow::ShowOverflowFlyout(int ci,
     if (auto open = m_overflowFlyout.get()) {
         open.Hide();
     }
+    // Where it grows out of: the cell it's opened from.
+    const wf::Rect origin = RootRect(anchor);
     xc::Flyout fly;
     ThemeFlyout(fly, m_dark);
+    if (auto style = fly.FlyoutPresenterStyle()) {
+        style.Setters().Append(Setter(
+            xc::Control::PaddingProperty(),
+            winrt::box_value(ThicknessHelper::FromUniformLength(kFlyoutPad))));
+    }
     auto surf = std::make_shared<BoardSurface>();
     xc::Grid root;
     root.RequestedTheme(m_dark ? ElementTheme::Dark : ElementTheme::Light);
+    // As wide as its apps' grid, like in Start.
+    const int cols = std::clamp(m_model.expandedColumns, kMinExpandedColumns,
+                                kMaxExpandedColumns);
+    const FlyoutLook look = FlyoutLookFor(m_model.iconSize);
+    root.Width(cols * look.cell + (cols - 1) * kFlyoutGap);
     surf->root = root;
     xc::StackPanel content;
     content.Spacing(8);
@@ -8288,14 +8575,18 @@ void SettingsWindow::ShowOverflowFlyout(int ci,
                                   : m_model.groups[ci].name,
                       20);
     title.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+    title.HorizontalAlignment(HorizontalAlignment::Center);
+    title.TextAlignment(TextAlignment::Center);
+    title.TextTrimming(TextTrimming::CharacterEllipsis);
     content.Children().Append(title);
     content.Children().Append(
         Text(folder >= 0
                  ? L"Drag the apps to reorder them, or out of the folder to "
                    L"move them. Click one to edit it below, right-click for "
                    L"more."
-                 : L"Drag the apps to reorder them. Click one to edit it "
-                   L"below, right-click for more.",
+                 : L"The apps that don't fit in the tile. Drag them to "
+                   L"reorder them. Click one to edit it below, right-click "
+                   L"for more.",
              12, true));
     if (folder >= 0) {
         // Add app, into the folder.
@@ -8349,7 +8640,27 @@ void SettingsWindow::ShowOverflowFlyout(int ci,
         // Show the new order in the tile.
         Later([this] { RebuildBoard(); });
     });
-    fly.ShowAt(anchor);
+    // Centered over the board, like Start's folders over Start.
+    wf::Rect area{0, 0, 0, 0};
+    int depth = 0;
+    for (DependencyObject p = m_boardHost; p && depth < 12;
+         p = xm::VisualTreeHelper::GetParent(p), depth++) {
+        if (auto sv = p.try_as<xc::ScrollViewer>()) {
+            area = RootRect(sv);
+            break;
+        }
+    }
+    if (area.Width <= 0 && m_boardHost) {
+        area = RootRect(m_boardHost);
+    }
+    wf::Size size{0, 0};
+    try {
+        root.Measure({(float)root.Width(), INFINITY});
+        size = {(float)(root.Width() + 2 * kFlyoutPad + 2),
+                root.DesiredSize().Height + (float)(2 * kFlyoutPad + 2)};
+    } catch (...) {
+    }
+    ShowCenteredOver(fly, anchor, area, size, origin);
 }
 
 // Opens a folder on the board (from the cell showing it, or from the
@@ -8400,6 +8711,14 @@ void SettingsWindow::RebuildFlyout() {
         return;
     }
     auto const& list = fi >= 0 ? group.items[fi].children : group.items;
+    // A group: the apps in its overflow cluster (all, if it has none).
+    int first = 0;
+    if (fi < 0) {
+        if (auto it = m_overflowFirst.find(ci); it != m_overflowFirst.end()) {
+            first = std::clamp(it->second, 0, (int)list.size());
+        }
+    }
+    const int shown = (int)list.size() - first;
     int cols = std::clamp(m_model.expandedColumns, kMinExpandedColumns,
                           kMaxExpandedColumns);
     const FlyoutLook look = FlyoutLookFor(m_model.iconSize);  // as in Start
@@ -8411,13 +8730,13 @@ void SettingsWindow::RebuildFlyout() {
         cd.Width(GridLengthHelper::FromPixels(look.cell));
         grid.ColumnDefinitions().Append(cd);
     }
-    int rows = ((int)list.size() + cols - 1) / cols;
+    int rows = (shown + cols - 1) / cols;
     for (int r = 0; r < rows; r++) {
         xc::RowDefinition rd;
         rd.Height(GridLengthHelper::Auto());
         grid.RowDefinitions().Append(rd);
     }
-    for (int i = 0; i < (int)list.size(); i++) {
+    for (int i = first; i < (int)list.size(); i++) {
         auto const& item = list[i];
         xc::Border cellEl;
         cellEl.Background(Brush(0, 0, 0, 0));
@@ -8459,8 +8778,8 @@ void SettingsWindow::RebuildFlyout() {
         } else {
             MakeDraggable(cellEl, surf, DragKind::App, ci, i, L"", open);
         }
-        xc::Grid::SetRow(cellEl, i / cols);
-        xc::Grid::SetColumn(cellEl, i % cols);
+        xc::Grid::SetRow(cellEl, (i - first) / cols);
+        xc::Grid::SetColumn(cellEl, (i - first) % cols);
         grid.Children().Append(cellEl);
         surf->cells.push_back(
             {cellEl, ci, fi >= 0 ? fi : i, false, fi >= 0 ? i : -1, folder});
@@ -8468,6 +8787,17 @@ void SettingsWindow::RebuildFlyout() {
     surf->tiles.push_back({grid, ci, nullptr});
     xc::ScrollViewer sv;
     sv.MaxHeight(480);
+    // A fixed size like Start's: room for kFlyoutMinRows rows of apps.
+    double rowH = look.cell;
+    try {
+        grid.Measure({INFINITY, INFINITY});
+        if (rows > 0 && grid.DesiredSize().Height > 0) {
+            rowH = (grid.DesiredSize().Height - (rows - 1) * 4) / rows;
+        }
+    } catch (...) {
+    }
+    sv.MinHeight(std::min(480.0, kFlyoutMinRows * rowH +
+                                     (kFlyoutMinRows - 1) * 4.0));
     sv.VerticalScrollBarVisibility(xc::ScrollBarVisibility::Auto);
     sv.Content(grid);
     m_flyoutHost.Child(sv);
