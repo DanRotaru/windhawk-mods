@@ -1545,6 +1545,10 @@ void AllowLaunchedAppToFront() {
     AllowSetForegroundWindow(ASFW_ANY);
 }
 
+// Start's window, where the mod's UI is (set on Start's UI thread, by
+// InstallStartUi).
+HWND g_coreWnd = nullptr;
+
 // Start's window: the CoreWindow of this process (StartMenuExperienceHost).
 HWND FindStartWindow() {
     struct Find {
@@ -1579,13 +1583,57 @@ bool IsStartOpen(HWND start) {
     return !(cloaked & ~DWM_CLOAKED_APP);
 }
 
-// Hides or shows Start's window, without closing or opening Start.
-void CloakStart(HWND start, bool cloak) {
-    BOOL value = cloak;
-    HRESULT hr =
-        DwmSetWindowAttribute(start, DWMWA_CLOAK, &value, sizeof(value));
-    if (FAILED(hr)) {
-        Wh_Log(L"Cloaking Start (%d) failed: %08X", cloak, hr);
+std::vector<xcp::Popup> OpenPopups();
+
+// Hides or shows what Start shows, without closing or opening Start (UI
+// thread): its XAML content and open popups (an opened group). Hiding
+// plays Start's own closing animation, a slide down as it fades out.
+// Start's window can't be cloaked (DWMWA_CLOAK has no effect on it), and
+// Start draws all of itself, background included, in XAML.
+void HideStartContent(bool hide) {
+    try {
+        std::vector<UIElement> els;
+        if (auto window = Window::Current()) {
+            if (auto content = window.Content()) {
+                els.push_back(content);
+            }
+        }
+        for (auto const& popup : OpenPopups()) {
+            if (auto child = popup.Child()) {
+                els.push_back(child);
+            }
+        }
+        using namespace std::chrono_literals;
+        namespace xh = winrt::Windows::UI::Xaml::Hosting;
+        for (auto const& el : els) {
+            auto v = xh::ElementCompositionPreview::GetElementVisual(el);
+            xh::ElementCompositionPreview::SetIsTranslationEnabled(el, true);
+            // Also an opened group's own closing animation, which would
+            // keep it in place a while.
+            v.StopAnimation(L"Opacity");
+            v.StopAnimation(L"Translation");
+            if (!hide) {
+                v.Properties().InsertVector3(L"Translation", {0, 0, 0});
+                v.Opacity(1.0f);
+                continue;
+            }
+            auto comp = v.Compositor();
+            // Windows' "accelerate" curve, as Start closes.
+            auto ease = comp.CreateCubicBezierEasingFunction({0.7f, 0.0f},
+                                                             {1.0f, 0.5f});
+            const wf::TimeSpan len(200ms);
+            auto slide = comp.CreateVector3KeyFrameAnimation();
+            slide.InsertKeyFrame(0, {0, 0, 0});
+            slide.InsertKeyFrame(1, {0, 120, 0}, ease);
+            slide.Duration(len);
+            auto fade = comp.CreateScalarKeyFrameAnimation();
+            fade.InsertExpressionKeyFrame(0, L"this.StartingValue");
+            fade.InsertKeyFrame(1, 0, ease);
+            fade.Duration(len);
+            v.StartAnimation(L"Translation", slide);
+            v.StartAnimation(L"Opacity", fade);
+        }
+    } catch (...) {
     }
 }
 
@@ -1648,15 +1696,20 @@ std::vector<HWND> OtherAppWindows() {
 // as any input takes away the right Windows gave the app to come to the
 // front (AllowLaunchedAppToFront), and Start closing hands the focus back to
 // the window before it, leaving the app behind it. So Start is hidden at
-// once instead (cloaked), and shown again once it's closed.
+// once instead (its content made transparent, like Start disappears when it
+// launches an app itself), and shown again once it's closed.
 void CloseStartAfterLaunch(int seconds = 3) {
     // Taken now, before the launch, to tell the app's windows apart.
     auto before = std::make_shared<std::vector<HWND>>(OtherAppWindows());
-    HWND start = FindStartWindow();
+    // The window the mod's UI is in. Not found by its class: this process
+    // can have other CoreWindows, and a hidden one would look like Start
+    // closed, leaving Start up until the app's window came to the front.
+    HWND start = g_coreWnd && IsWindow(g_coreWnd) ? g_coreWnd
+                                                   : FindStartWindow();
     if (!start || !IsStartOpen(start)) {
         return;
     }
-    CloakStart(start, true);
+    HideStartContent(true);
     RunWorker([seconds, before, start] {
         // Shown again once Start is closed (its own cloak then hides it),
         // or still open after all.
@@ -1668,7 +1721,7 @@ void CloseStartAfterLaunch(int seconds = 3) {
                         break;
                     }
                 }
-                CloakStart(start, false);
+                PostToUi([] { HideStartContent(false); });
             }
         } uncloak{start};
         constexpr int kStep = 100;
@@ -4565,7 +4618,6 @@ constexpr UINT_PTR kMenuTimerId = 2;
 constexpr UINT kScanIntervalMs = 200;
 
 // UI thread only:
-HWND g_coreWnd = nullptr;
 bool g_startWasOpen = false;
 DWORD g_lastScanTick = 0;
 int g_failedScans = 0;
@@ -4824,6 +4876,8 @@ void UninstallStartUi() {
     }
     KillTimer(wnd, kScanTimerId);
     KillTimer(wnd, kMenuTimerId);
+    // Shown again if it was hidden after a launch (CloseStartAfterLaunch).
+    HideStartContent(false);
     try {
         for (auto& weak : g_flyouts) {
             if (auto fly = weak.get()) {
