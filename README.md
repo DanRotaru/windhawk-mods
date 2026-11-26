@@ -11,6 +11,7 @@ mod: a single `*.wh.cpp` source file plus its own README.
 | Mod | Description | Target |
 | --- | --- | --- |
 | [Chrome Context Menu Items](chrome-context-menu-items/) | Hides, adds, groups and reorders Google Chrome's context menu items, restyles Chrome's menus, and tweaks tabs and extension buttons. | `chrome.exe` |
+| [Chrome PiP Customizer](chrome-pip-customizer/) | Customizes Chrome's video picture-in-picture window: removes the hover dimming, moves the playback controls to the bottom, hides the site name, and hides any button. | `chrome.exe` |
 | [Explorer Command Bar](explorer-command-bar/) | Adds custom action buttons and dropdown menus to the Windows 11 File Explorer command bar, and lets you hide the built-in buttons, separators and spacing. | `explorer.exe`, Windows 11 24H2 / 25H2 / 26H2 |
 | [Explorer Default Folder](explorer-default-folder/) | Opens new File Explorer windows and tabs in a folder of your choice instead of This PC or Home, or reopens the last closed folder. | `explorer.exe`, Windows 10 / 11 |
 | [Start Menu Groups](start-menu-groups/) | Adds your own app groups to the Windows 11 Start menu in the style of Start's category view, with resizable tiles, programs, websites, custom icons and a drag & drop settings window. | `StartMenuExperienceHost.exe`, `explorer.exe`, Windows 11 |
