@@ -7,9 +7,7 @@ By default the window gets a compact player: no dimming on hover, a
 transparent play/pause button left of the progress bar, everything on one row,
 a pin button instead of minimize, and click-to-pause on the video.
 
-```
-[▶] 2:50 / 10:27 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ [⛶] [🔊]
-```
+![Chrome PiP Customizer](screenshots/main.webp)
 
 ## Features
 
@@ -26,7 +24,7 @@ a pin button instead of minimize, and click-to-pause on the video.
 | **Remove the size limits** | Resize the window below Chrome's 284×160 minimum and above its 80%-of-the-screen maximum (on by default). |
 | **When closing** | One behavior for every way of closing the window (close button, Alt+F4, taskbar, middle click, Ctrl+click): go back to the tab (default), pause the video, or keep it playing. |
 | **Site name** | Show or hide the site name and its icon in the top left corner, or show the tab title instead of the site name. |
-| **Click the video to play/pause** | A click that doesn't move the window plays or pauses; dragging still moves it. |
+| **Click the video to play/pause** | A click that doesn't move the window plays or pauses; dragging still moves it. Off by default. |
 | **Hide the border and rounded corners in full screen** | Removes the 1 px border and rounded corners Windows draws around the window while it is in full screen (off by default). |
 | **Double-click for full screen** | The window fills its screen with only the video; double-click again or press Esc to restore it. A pinned window is unpinned while in full screen and pinned again afterwards. |
 | **Middle click or Ctrl+click closes the window** | Uses the "When closing" behavior. |
@@ -62,7 +60,8 @@ touching the wrong views.
 
 Chrome reports the video area to Windows as the window's caption, which is
 what makes it draggable. The mod subclasses the PiP window and treats a
-caption press that ends without moving the window as a click. A double-click
-undoes the play/pause of its first click before toggling full screen, as video
-sites do. The pin button is Chrome's minimize button with a pin icon; the mod
+caption press that ends without moving the window as a click. With
+double-click for full screen on, the click plays or pauses 0.2 s after the
+press, so a quick double-click toggles full screen without pausing the video;
+a slower one undoes the first click's play/pause. The pin button is Chrome's minimize button with a pin icon; the mod
 takes its clicks before Chrome sees them.

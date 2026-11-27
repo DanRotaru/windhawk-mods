@@ -5,6 +5,7 @@
 // @version         1.0.0
 // @author          DanRotaru
 // @github          https://github.com/DanRotaru
+// @donateUrl       https://buymeacoffee.com/widget/page/danrotaru
 // @homepage        https://dan13.me/
 // @include         chrome.exe
 // @architecture    x86-64
@@ -16,6 +17,8 @@
 # Chrome PiP Customizer
 
 Customizes the video picture-in-picture (PiP) window of Google Chrome.
+
+![Chrome PiP Customizer](https://raw.githubusercontent.com/DanRotaru/windhawk-mods/master/chrome-pip-customizer/screenshots/main.webp)
 
 - **Hover shading**: remove the dark overlay that dims the video while the
   pointer is over the window, and the dark gradients at the top and bottom.
@@ -44,6 +47,8 @@ Customizes the video picture-in-picture (PiP) window of Google Chrome.
 - **Hide controls**: hide the minimize, back to tab, close, volume, live
   caption, play/pause, seek, previous/next track buttons, the progress bar and
   the time.
+
+## Notes
 
 Changes apply the next time the pointer moves over an open PiP window. After
 turning off the pin button or disabling the mod, reopen the PiP window to get
@@ -121,7 +126,7 @@ while; later starts use Windhawk's cache.
   - backToTab: Go back to the tab
   - pause: Pause the video (Chrome's close button)
   - keepPlaying: Keep the video playing in its tab
-- clickToPlayPause: true
+- clickToPlayPause: false
   $name: Click the video to play/pause
   $description: A click that doesn't move the window plays or pauses the video. Dragging still moves the window.
 - doubleClickFullscreen: true
@@ -212,7 +217,7 @@ struct Settings {
   bool showPinButton = true;
   bool unrestrictedSize = true;
   CloseAction closeAction = CloseAction::BackToTab;
-  bool clickToPlayPause = true;
+  bool clickToPlayPause = false;
   bool doubleClickFullscreen = true;
   bool fullscreenNoBorder = false;
   bool middleClickClose = true;
@@ -1406,9 +1411,22 @@ struct PendingClick {
 };
 static PendingClick g_pendingClick;
 
-// The last click that played or paused, so a double-click can undo it.
+// With double-click for full screen, a click plays or pauses a moment after
+// the press, so a quick double-click doesn't briefly pause the video. This
+// timer, set on the PiP window, waits. Most double-clicks press again well
+// within this time; waiting the whole double-click time felt sluggish.
+static constexpr UINT_PTR kClickToggleTimerId = 0x50495043;  // 'PIPC'
+static constexpr DWORD kClickToggleDelayMs = 200;
+
+// The last click that played or paused, so a slower double-click can undo it.
 static HWND g_lastToggleHwnd;
 static DWORD g_lastToggleTime;
+
+static void ClickTogglePlayPause(HWND hwnd, void* window) {
+  TogglePlayPause(window);
+  g_lastToggleHwnd = hwnd;
+  g_lastToggleTime = GetTickCount();
+}
 
 // The window whose pin, full screen or crop button got the last left press.
 static HWND g_pinPressHwnd;
@@ -1433,11 +1451,21 @@ static void FinishPendingClick(HWND hwnd, void* window) {
       abs(cursor.x - click.cursor.x) > GetSystemMetrics(SM_CXDRAG) ||
       abs(cursor.y - click.cursor.y) > GetSystemMetrics(SM_CYDRAG);
   const bool tooLong = GetTickCount() - click.time > 1000;
-  if (!windowMoved && !cursorMoved && !tooLong) {
-    TogglePlayPause(window);
-    g_lastToggleHwnd = hwnd;
-    g_lastToggleTime = GetTickCount();
+  if (windowMoved || cursorMoved || tooLong) {
+    return;
   }
+  if (!GetSettings().doubleClickFullscreen) {
+    ClickTogglePlayPause(hwnd, window);
+    return;
+  }
+  // Counted from the press, as the double-click time is.
+  const DWORD delay = std::min<DWORD>(kClickToggleDelayMs, GetDoubleClickTime());
+  const DWORD elapsed = GetTickCount() - click.time;
+  if (elapsed >= delay) {
+    ClickTogglePlayPause(hwnd, window);
+    return;
+  }
+  SetTimer(hwnd, kClickToggleTimerId, delay - elapsed, nullptr);
 }
 
 // Sets whether the window stays on top, and updates the pin button.
@@ -1616,15 +1644,24 @@ static LRESULT CALLBACK PipWindowSubclassProc(HWND hwnd, UINT msg, WPARAM wParam
       if (wParam != HTCAPTION || !GetSettings().doubleClickFullscreen) {
         break;
       }
-      // The first click of the double-click played or paused; undo it.
-      if (g_lastToggleHwnd == hwnd &&
-          GetTickCount() - g_lastToggleTime <= GetDoubleClickTime() + 100) {
+      // A quick double-click: the first click hasn't played or paused yet.
+      // A slower one: it has; undo it.
+      if (!KillTimer(hwnd, kClickToggleTimerId) && g_lastToggleHwnd == hwnd &&
+          GetTickCount() - g_lastToggleTime <= GetDoubleClickTime()) {
         TogglePlayPause(window);
       }
       g_lastToggleHwnd = nullptr;
       ToggleFullscreen(hwnd, window);
       return 0;
     }
+
+    case WM_TIMER:
+      if (wParam == kClickToggleTimerId) {
+        KillTimer(hwnd, kClickToggleTimerId);
+        ClickTogglePlayPause(hwnd, window);
+        return 0;
+      }
+      break;
 
     case WM_MOUSEMOVE:
       UpdatePlayButtonHover(hwnd, window, &lParam);
@@ -1679,6 +1716,7 @@ static LRESULT CALLBACK PipWindowSubclassProc(HWND hwnd, UINT msg, WPARAM wParam
     }
 
     case WM_NCDESTROY: {
+      KillTimer(hwnd, kClickToggleTimerId);
       if (g_pendingClick.hwnd == hwnd) {
         g_pendingClick = {};
       }
