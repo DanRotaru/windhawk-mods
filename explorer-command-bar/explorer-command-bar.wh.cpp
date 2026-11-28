@@ -2,7 +2,7 @@
 // @id              explorer-command-bar
 // @name            Explorer Command Bar
 // @description     Customize the Windows 11 File Explorer command bar with commands, menus, New+, and a shell context-menu button
-// @version         1.3.0
+// @version         1.4.0
 // @author          DanRotaru
 // @github          https://github.com/DanRotaru
 // @donateUrl       https://buymeacoffee.com/widget/page/danrotaru
@@ -165,6 +165,10 @@ Instead of an executable, the **Command** field can run built-in File Explorer a
   and ready to be renamed.
 * `internal:NewFile` - creates a new empty file the same way.
 * `internal:Refresh` - refreshes the current folder.
+* `internal:ViewExtraLargeIcons` - show extra large icons in the file view.
+* `internal:ViewLargeIcons` - show large icons in the file view.
+* `internal:ViewMediumIcons` - show medium icons in the file view.
+* `internal:ViewSmallIcons` - show small icons in the file view.
 
 For `NewFolder` and `NewFile`, the **Parameters** field sets the name, e.g.
 `Notes $YYYY-$MM-$DD.md` (the [filename variables](#filename-variables) of
@@ -441,7 +445,9 @@ File Explorer report the island's XAML root to a hooked handler.
         prefix (case-insensitive): internal:TogglePreview,
         internal:ToggleDetails, internal:FolderOptions, internal:OpenWith,
         internal:CopyPath, internal:CopyName, internal:CopyDir,
-        internal:NewFolder, internal:NewFile or internal:Refresh. For
+        internal:NewFolder, internal:NewFile, internal:Refresh,
+        internal:ViewExtraLargeIcons, internal:ViewLargeIcons,
+        internal:ViewMediumIcons or internal:ViewSmallIcons. For
         NewFolder and NewFile, the parameters set the name.
     - parameters: -d "%path%"
       $name: Parameters
@@ -2709,6 +2715,26 @@ void InvokeActionItem(HWND hWnd,
         return;
     }
 
+    if (IsCommandMatch(cmd, L"ViewExtraLargeIcons")) {
+        SendKeyCombo({VK_CONTROL, VK_SHIFT, '1'});
+        return;
+    }
+
+    if (IsCommandMatch(cmd, L"ViewLargeIcons")) {
+        SendKeyCombo({VK_CONTROL, VK_SHIFT, '2'});
+        return;
+    }
+
+    if (IsCommandMatch(cmd, L"ViewMediumIcons")) {
+        SendKeyCombo({VK_CONTROL, VK_SHIFT, '3'});
+        return;
+    }
+
+    if (IsCommandMatch(cmd, L"ViewSmallIcons")) {
+        SendKeyCombo({VK_CONTROL, VK_SHIFT, '4'});
+        return;
+    }
+
     if (IsCommandMatch(cmd, L"FolderOptions")) {
         RunShellWorkOnWorkerThread([]() {
             ShellExecuteW(nullptr, L"open", L"control.exe", L"folders", nullptr,
@@ -3635,6 +3661,14 @@ PCWSTR InternalCommandGlyph(std::wstring_view cmd) {
         return L"\uE8A1";
     if (IsCommandMatch(cmd, L"ToggleDetails"))
         return L"\uE9F9";
+    if (IsCommandMatch(cmd, L"ViewExtraLargeIcons"))
+        return L"\uF16B";
+    if (IsCommandMatch(cmd, L"ViewLargeIcons"))
+        return L"\uF12A";
+    if (IsCommandMatch(cmd, L"ViewMediumIcons"))
+        return L"\uF129";
+    if (IsCommandMatch(cmd, L"ViewSmallIcons"))
+        return L"\uF0E2";
     if (IsCommandMatch(cmd, L"FolderOptions"))
         return L"\uE713";
     if (IsCommandMatch(cmd, L"CopyPath"))
@@ -3652,12 +3686,83 @@ PCWSTR InternalCommandGlyph(std::wstring_view cmd) {
     return nullptr;
 }
 
-muxc::IconElement MakeCommandButtonIcon(ActionItem const& item) {
+std::wstring MakeViewCommandSvgUri(std::wstring_view viewIconUri,
+                                   std::wstring_view command) {
+    std::wstring_view fileName;
+    if (IsCommandMatch(command, L"ViewExtraLargeIcons"))
+        fileName = L"windows.iconsize.extralarge.svg";
+    else if (IsCommandMatch(command, L"ViewLargeIcons"))
+        fileName = L"windows.iconsize.large.svg";
+    else if (IsCommandMatch(command, L"ViewMediumIcons"))
+        fileName = L"windows.iconsize.medium.svg";
+    else if (IsCommandMatch(command, L"ViewSmallIcons"))
+        fileName = L"windows.iconsize.smallicon.svg";
+    else
+        return std::wstring();
+
+    size_t slash = viewIconUri.find_last_of(L'/');
+    if (slash == std::wstring_view::npos)
+        return std::wstring();
+
+    std::wstring sourceFileName =
+        ToLower(std::wstring(viewIconUri.substr(slash + 1)));
+    if (!sourceFileName.starts_with(L"windows.iconsize."))
+        return std::wstring();
+
+    return std::wstring(viewIconUri.substr(0, slash + 1)) +
+           std::wstring(fileName);
+}
+
+bool IsInternalViewCommand(std::wstring_view command) {
+    return IsCommandMatch(command, L"ViewExtraLargeIcons") ||
+           IsCommandMatch(command, L"ViewLargeIcons") ||
+           IsCommandMatch(command, L"ViewMediumIcons") ||
+           IsCommandMatch(command, L"ViewSmallIcons");
+}
+
+muxc::IconElement CreateSvgIcon(std::wstring const& iconUri) try {
+    muxm::Imaging::SvgImageSource svgSource(
+        wf::Uri(winrt::hstring{iconUri}));
+    muxc::ImageIcon imageIcon;
+    imageIcon.Source(svgSource);
+    return imageIcon;
+} catch (...) {
+    Wh_Log(L"Error %08X", winrt::to_hresult().value);
+    return nullptr;
+}
+
+std::wstring GetRememberedViewButtonIconUri();
+
+muxc::IconElement MakeCommandButtonIcon(
+    ActionItem const& item,
+    std::wstring_view viewIconUri) {
     if (item.hideIcon)
         return nullptr;
 
+    bool useDefaultViewIcon =
+        IsInternalViewCommand(item.command) &&
+        (item.icon.empty() ||
+         ToLower(TrimQuotesAndSpaces(item.icon)) == L"e8a7");
+
+    if (useDefaultViewIcon) {
+        std::wstring rememberedViewIconUri;
+        if (viewIconUri.empty()) {
+            rememberedViewIconUri = GetRememberedViewButtonIconUri();
+            viewIconUri = rememberedViewIconUri;
+        }
+
+        if (std::wstring svgUri =
+                MakeViewCommandSvgUri(viewIconUri, item.command);
+            !svgUri.empty()) {
+            if (auto icon = CreateSvgIcon(svgUri))
+                return icon;
+        }
+    }
+
     PCWSTR defaultGlyph = InternalCommandGlyph(item.command);
-    return CreateIconElement(item.icon, item.command,
+    std::wstring iconSetting =
+        useDefaultViewIcon ? std::wstring() : item.icon;
+    return CreateIconElement(iconSetting, item.command,
                              defaultGlyph ? defaultGlyph : L"\uE783");
 }
 
@@ -3792,6 +3897,27 @@ void RememberDefaultButtonLook(DefaultButtonLook* look,
         look->iconUri = std::move(iconUri);
     if (!label.empty())
         look->label = std::move(label);
+}
+
+std::wstring GetRememberedViewButtonIconUri() {
+    std::lock_guard<std::mutex> lock(g_defaultButtonLooksMutex);
+    return g_defaultButtonLooks[kViewButtonIndex].iconUri;
+}
+
+std::wstring GetCommandBarViewButtonIconUri(
+    muxc::CommandBar const& commandBar) {
+    for (auto const& command : commandBar.PrimaryCommands()) {
+        if (IsOurElement(command))
+            continue;
+        if (auto button = command.try_as<muxc::AppBarButton>();
+            button && IdentifyDefaultButton(button) == kViewButtonIndex) {
+            std::wstring iconUri = GetButtonIconUri(button);
+            if (!iconUri.empty())
+                return iconUri;
+        }
+    }
+
+    return GetRememberedViewButtonIconUri();
 }
 
 std::wstring GetAutomationId(mux::FrameworkElement const& element) {
@@ -4461,9 +4587,13 @@ muxc::AppBarButton CreateBareButton(int index,
 
 muxc::IconElement TryCreateIconElement(std::wstring const& iconSetting,
                                        std::wstring const& command);
-muxc::IconElement MakeCommandButtonIcon(ActionItem const& item);
+muxc::IconElement MakeCommandButtonIcon(
+    ActionItem const& item,
+    std::wstring_view viewIconUri);
 
-muxc::AppBarButton CreateActionButton(ActionItem const& item, int index) {
+muxc::AppBarButton CreateActionButton(ActionItem const& item,
+                                      int index,
+                                      std::wstring_view viewIconUri) {
     std::wstring displayLabel = item.GetDisplayLabel();
     ExplorerContext emptyCtx;
     std::wstring fullResolved = (displayLabel.find(L'%') != std::wstring::npos)
@@ -4474,7 +4604,8 @@ muxc::AppBarButton CreateActionButton(ActionItem const& item, int index) {
 
     muxc::AppBarButton button =
         CreateBareButton(index, fullResolved, displayResolved,
-                         MakeCommandButtonIcon(item), item.showLabel);
+                         MakeCommandButtonIcon(item, viewIconUri),
+                         item.showLabel);
 
     TrackRevoker(
         button,
@@ -4697,7 +4828,8 @@ muxc::AppBarButton CreateMenuButton(ActionItem const& item,
                                     int index,
                                     bool openOnHover,
                                     int hoverDelayMs,
-                                    bool showChevron) {
+                                    bool showChevron,
+                                    std::wstring_view viewIconUri) {
     std::wstring displayLabel = item.GetDisplayLabel();
     ExplorerContext emptyCtx;
     std::wstring fullResolved = (displayLabel.find(L'%') != std::wstring::npos)
@@ -4712,7 +4844,8 @@ muxc::AppBarButton CreateMenuButton(ActionItem const& item,
 
     muxc::AppBarButton button =
         CreateBareButton(index, fullResolved, finalLabel,
-                         MakeCommandButtonIcon(item), hasLabel || showChevron);
+                         MakeCommandButtonIcon(item, viewIconUri),
+                         hasLabel || showChevron);
 
     if (showChevron) {
         TrackRevoker(
@@ -5483,6 +5616,7 @@ void EnsureActionButtons(muxc::CommandBar const& commandBar) {
     if (items.empty())
         return;
 
+    std::wstring viewIconUri = GetCommandBarViewButtonIconUri(commandBar);
     Wh_Log(L"Adding %zu items to command bar", items.size());
     auto commands = commandBar.PrimaryCommands();
 
@@ -5494,10 +5628,12 @@ void EnsureActionButtons(muxc::CommandBar const& commandBar) {
                 commands.InsertAt(
                     insertIndex++,
                     CreateMenuButton(item, (int)i, openMenuOnHover,
-                                     menuHoverDelay, showMenuChevrons));
+                                     menuHoverDelay, showMenuChevrons,
+                                     viewIconUri));
             } else {
                 commands.InsertAt(insertIndex++,
-                                  CreateActionButton(item, (int)i));
+                                  CreateActionButton(item, (int)i,
+                                                     viewIconUri));
             }
 
             if (item.separatorAfter) {
@@ -5516,9 +5652,10 @@ void EnsureActionButtons(muxc::CommandBar const& commandBar) {
         auto const& item = items[i];
         if (item.isMenu && !item.subItems.empty()) {
             commands.Append(CreateMenuButton(item, (int)i, openMenuOnHover,
-                                             menuHoverDelay, showMenuChevrons));
+                                             menuHoverDelay, showMenuChevrons,
+                                             viewIconUri));
         } else {
-            commands.Append(CreateActionButton(item, (int)i));
+            commands.Append(CreateActionButton(item, (int)i, viewIconUri));
         }
 
         if (item.separatorAfter) {
@@ -10074,7 +10211,8 @@ muxc::AppBarToggleButton SettingsWindow::MakePreviewItem(ActionItem const& item,
     std::wstring label = item.labelText.empty() ? item.name : item.labelText;
     bool hasLabel = item.showLabel && !label.empty();
     button.Label(chevron ? MenuButtonLabel(label, hasLabel, true) : label);
-    if (auto icon = MakeCommandButtonIcon(item))
+    if (auto icon =
+            MakeCommandButtonIcon(item, GetRememberedViewButtonIconUri()))
         button.Icon(icon);
     button.LabelPosition(hasLabel || chevron
                              ? muxc::CommandBarLabelPosition::Default
@@ -10869,6 +11007,10 @@ void SettingsWindow::BuildItemEditor() {
             {
                 {L"internal:TogglePreview", L"Toggle the Preview pane"},
                 {L"internal:ToggleDetails", L"Toggle the Details pane"},
+                {L"internal:ViewExtraLargeIcons", L"View Extra Large Icons"},
+                {L"internal:ViewLargeIcons", L"View Large Icons"},
+                {L"internal:ViewMediumIcons", L"View Medium Icons"},
+                {L"internal:ViewSmallIcons", L"View Small Icons"},
                 {L"internal:OpenWith", L"Open with\u2026"},
                 {L"internal:FolderOptions", L"Folder Options"},
                 {L"internal:CopyPath", L"Copy the selected paths"},
